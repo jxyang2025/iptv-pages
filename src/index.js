@@ -32,6 +32,17 @@ const kvGet = async (env, key, fallback) => {
 };
 const kvPut = (env, key, val) => env.IPTV_KV.put(key, JSON.stringify(val));
 
+// 前端有两套字段约定：/api/channels 用 dataList，/api/my-playlist 用 channels。
+// 同一份分组数据必须两个字段都带，且指向同一数组，否则 renderGroupLists() 里
+// group.channels.length 会对 undefined 取 length 抛 TypeError（表现为"加载我的频道失败"）。
+function normalizeGroups(groups) {
+  return (Array.isArray(groups) ? groups : []).map(g => {
+    const list = Array.isArray(g.channels) ? g.channels
+      : (Array.isArray(g.dataList) ? g.dataList : []);
+    return { ...g, channels: list, dataList: list };
+  });
+}
+
 // ---------- 默认配置 ----------
 const DEFAULT_SYS = {
   port: 0, host: '', pass: '', adminPath: 'admin',
@@ -239,7 +250,7 @@ function rebuildChannels(extConfig) {
       });
     }
   }
-  return [...groups.entries()].map(([name, dataList]) => ({ name, dataList }));
+  return normalizeGroups([...groups.entries()].map(([name, dataList]) => ({ name, dataList })));
 }
 
 // 保存配置后同步重建频道 + M3U
@@ -296,7 +307,7 @@ async function handleApi(request, env, url, rel) {
 
   // 硬门槛 GET（页面初始化必须 200）
   if (seg === 'channels' && method === 'GET') {
-    return json(await kvGet(env, 'channels', [])); // 裸数组
+    return json(normalizeGroups(await kvGet(env, 'channels', []))); // 裸数组，双字段兼容
   }
   if (seg === 'system-config' && method === 'GET') {
     return json(await kvGet(env, 'sys-config', DEFAULT_SYS)); // 裸对象
@@ -330,7 +341,7 @@ async function handleApi(request, env, url, rel) {
     return ok(body, { message: '已保存' });
   }
   if (seg === 'my-playlist' && method === 'GET') {
-    const channels = await kvGet(env, 'channels', []);
+    const channels = normalizeGroups(await kvGet(env, 'channels', []));
     return ok(channels, { originalData: channels, hiddenCustomGroups: [] });
   }
   if (seg === 'my-playlist-profiles' && method === 'GET') return ok([{ id: 'default', name: '默认' }]);
