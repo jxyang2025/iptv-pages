@@ -1,0 +1,21 @@
+# Cloudflare Pages 项目配置
+# 文档: https://developers.cloudflare.com/pages/configuration/
+
+name = "iptv-pages"
+compatibility_date = "2026-11-25"
+
+# Pages 会上传 web/ 作为静态资源目录（admin.html、player.html、icons、vendor、_headers、_redirects）
+pages_build_output_dir = "web"
+
+# functions/ 目录下的 [[path]].js 会自动注册为 Pages Functions，无需额外声明。
+#
+# 敏感配置请在 Cloudflare 控制台配置，不要写进本文件：
+#   Settings → Environment variables → 添加（生产与预览环境都要加）
+#   BACKEND_ORIGIN = https://你的Tunnel域名        （必填，不要带尾斜杠）
+#   BACKEND_PASS   = 后端系统配置里的访问密码       （可选，未设密码就留空）
+#   BACKEND_PREFIX = 反向代理子路径，如 /iptv        （可选，默认留空）
+#
+# 本地调试时，可在项目根目录放 .dev.vars 文件（已加入 .gitignore）：
+#   BACKEND_ORIGIN="http://127.0.0.1:8888"
+#   BACKEND_PASS=""
+#   BACKEND_PREFIX=""

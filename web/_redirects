@@ -1,0 +1,20 @@
+# Cloudflare Pages 路由规则
+# 语法: /来源  /目标  状态码
+#   200 = 内部重写（URL 不变，静态资源由 Pages 直接返回，不耗 Functions 请求）
+
+# ---- 播放器静态库：原后端把 /player-assets/<名> 映射到 web/vendor/<文件> ----
+/player-assets/mpegts.js     /vendor/mpegts.js     200
+/player-assets/hls.min.js    /vendor/hls.min.js    200
+/player-assets/DPlayer.min.js  /vendor/DPlayer.min.js 200
+
+# ---- 品牌图标：前端引用的是根路径，文件在 icons/ 下 ----
+/icon-512.png                /icons/icon-512.png        200
+/icon-dark-512.png           /icons/icon-dark-512.png   200
+/favicon.ico                 /icons/favicon.ico         200
+/favicon.svg                 /icons/favicon.svg         200
+/apple-touch-icon.png        /icons/apple-touch-icon.png 200
+
+# ---- 页面入口：/ 跳转到管理页；/admin 与 /player 作为友好路径 ----
+/                            /admin.html   302
+/admin                       /admin.html   200
+/player                      /player.html  200

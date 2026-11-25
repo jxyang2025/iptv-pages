@@ -1,0 +1,22 @@
+# Cloudflare Pages 响应头
+# 注意：管理页含大量内联脚本，不要在这里加严格 CSP，否则后台会白屏。
+
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: SAMEORIGIN
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+# 页面 HTML 不缓存，保证改配置后刷新即时生效
+/admin.html
+  Cache-Control: no-store
+/player.html
+  Cache-Control: no-store
+
+# 播放器库与图标：内容带版本 query，可长缓存
+/player-assets/*
+  Cache-Control: public, max-age=31536000, immutable
+/vendor/*
+  Cache-Control: public, max-age=31536000, immutable
+/icons/*
+  Cache-Control: public, max-age=86400
