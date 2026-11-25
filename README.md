@@ -29,13 +29,13 @@
 │   ├── player.html               # 播放器页
 │   ├── icons/                    # 品牌图标
 │   ├── vendor/                   # hls.js / mpegts.js / DPlayer（播放器库）
-│   ├── _redirects                # 路径映射：player-assets、图标、页面入口
-│   └── _headers                  # 缓存与安全响应头
-├── functions/
-│   ├── api/[[path]].js           # /api/* 反代 + 注入密码鉴权
-│   └── [[path]].js               # /m3u、/u/*、/playback.xml、/relay/*、/logos/* 反代
-├── wrangler.toml                 # Pages 项目配置
+│   ├── _redirects                # 路径映射（保留存档；Workers 模式下由 src/index.js 实现）
+│   └── _headers                  # 缓存与安全响应头（同上）
+├── src/
+│   └── index.js                  # Worker 入口：API/订阅反代 + 静态重写 + 安全头
+├── wrangler.toml                 # Workers + Assets 配置（新版向导用）
 ├── .dev.vars.example             # 本地调试环境变量模板
+├── scripts/sync-web.mjs          # 一键同步上游前端
 └── LICENSE                       # 上游 GPL-3.0 许可证
 ```
 
@@ -81,19 +81,19 @@ git remote add origin https://github.com/你的账号/iptv-pages.git
 git push -u origin main
 ```
 
-在 Pages 创建页选择该仓库，构建设置：
+在 Pages 创建页选择该仓库，构建设置（适配 **2026 新版向导**，它强制要求填 Deploy command）：
 
 | 配置项 | 值 |
 |---|---|
-| Deploy command | **留空**（不要填任何命令，详见下方「常见报错」） |
-| Build command | 留空（纯静态，无需构建） |
-| Build output directory | `web` |
+| Framework preset | **None / 无** |
+| Build command | `exit 0`（无需构建，空操作即可） |
+| Deploy command | `npx wrangler deploy` |
 | Root directory | 留空 `/` |
-| Functions directory | `functions`（默认即可） |
 
-> ⚠️ **不要填写 Deploy command**。本项目是纯静态 + Pages Functions，Git 集成会自动上传 `web/` 并注册 `functions/`。
-> 如果填了 `npx wrangler deploy`（Workers 的部署命令），会报 `Missing entry-point to Worker script or to assets directory` 而构建失败。
-> 若确实要用命令行手动部署，正确命令是 `npx wrangler pages deploy web --project-name=iptv-pages`（注意是 `pages deploy`）。
+> 📌 **为什么这样填**：2026 年 Cloudflare 已把 Pages 并入 Workers 体系，新版向导强制要求 Deploy command，且静态目录改由仓库根目录的 `wrangler.toml` 里 `[assets] directory = "./web"` 声明，`main = "src/index.js"` 是 Worker 反代入口。
+> 本项目已按此模式配置好，直接按上表填即可。旧版的 `Build output directory` / `Functions directory` 字段在新向导里不再需要。
+>
+> 常见报错：`Missing entry-point to Worker script or to assets directory` —— 多半是 `wrangler.toml` 没被读到，确认它在仓库根目录、且含 `main` 与 `[assets]` 两段。
 
 ### 第 4 步：配置环境变量
 
@@ -120,18 +120,18 @@ git push -u origin main
 
 ```bash
 cp .dev.vars.example .dev.vars   # 填好后端地址
-npx wrangler pages dev web --compatibility-date 2026-11-25
+npx wrangler dev                 # Workers + Assets 模式，读 wrangler.toml
 ```
 
 打开终端显示的本地地址即可。注意 `.dev.vars` 已加入 `.gitignore`，不会被提交。
 
 ## 已知限制与注意事项（重要）
 
-1. **视频流不走 Pages**。M3U 里的频道直链由上游后端生成，仍指向源站/Tunnel；播放器拉流是直接连源站的，不会经过 Pages Functions。只有「全代理版」订阅（`relay=2`，分片也过服务器转发）的流量会经过 Tunnel，会占用 Cloudflare 的出站流量与 Workers 请求额度，个人用建议用兼容版或默认版。
-2. **Workers 请求额度**。Pages Functions 按请求数计费（免费额度有限）。管理后台每次操作都会发 API 请求，但正常家用量远低于免费额度；若有大量用户高频拉订阅，建议把订阅地址直接指向 Tunnel 域名，绕过 Pages。
+1. **视频流不走 Pages**。M3U 里的频道直链由上游后端生成，仍指向源站/Tunnel；播放器拉流是直接连源站的，不会经过 Worker。只有「全代理版」订阅（`relay=2`，分片也过服务器转发）的流量会经过 Tunnel，会占用 Cloudflare 的出站流量与 Workers 请求额度，个人用建议用兼容版或默认版。
+2. **Workers 请求额度**。反代 Worker 按请求数计费（免费额度有限）。管理后台每次操作都会发 API 请求，但正常家用量远低于免费额度；若有大量用户高频拉订阅，建议把订阅地址直接指向 Tunnel 域名，绕过 Pages。
 3. **地域限制仍在**。上游很多模块依赖大陆网络抓取（README 里标注「仅大陆」，境外 IP 会被 405）。Tunnel 只是加密通道，不改变后端所在网络的地域属性——所以后端必须放在大陆网络环境里，放海外 VPS 会导致大量频道抓取失败。
 4. **合规**。上游项目自带版权免责声明，请仅在合法授权范围内个人使用，不要公开分发转播。
-5. **升级前端**。上游发版后，只需重新下载 `web/` 里的 `admin.html`、`player.html`、`icons/`、`vendor/` 覆盖本项目的 `web/` 同名文件即可——`_redirects` 和 `_headers` 是我们加的，不要删。Functions 无需改动。
+5. **升级前端**。上游发版后，只需重新下载 `web/` 里的 `admin.html`、`player.html`、`icons/`、`vendor/` 覆盖本项目的 `web/` 同名文件即可——`_redirects` 和 `_headers` 是我们加的，不要删。`src/index.js` 与 `wrangler.toml` 无需改动。
 
 ## 同步上游前端脚本
 

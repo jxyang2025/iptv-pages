@@ -1,16 +1,19 @@
-# Cloudflare Pages 项目配置
-# 文档: https://developers.cloudflare.com/pages/configuration/
+# Cloudflare Workers + Static Assets 配置（新版向导，Deploy command = npx wrangler deploy）
+# 文档: https://developers.cloudflare.com/workers/static-assets/
 
 name = "iptv-pages"
+main = "src/index.js"
 compatibility_date = "2026-11-25"
+upload_source_maps = true
 
-# Pages 会上传 web/ 作为静态资源目录（admin.html、player.html、icons、vendor、_headers、_redirects）
-pages_build_output_dir = "web"
+[assets]
+directory = "./web"
+binding = "ASSETS"
+# 让所有请求先经过 Worker：需要处理根路径跳转、_redirects 重写、安全头注入
+run_worker_first = true
 
-# functions/ 目录下的 [[path]].js 会自动注册为 Pages Functions，无需额外声明。
-#
 # 敏感配置请在 Cloudflare 控制台配置，不要写进本文件：
-#   Settings → Environment variables → 添加（生产与预览环境都要加）
+#   Settings → Environment variables → 添加（Production 与 Preview 都要加）
 #   BACKEND_ORIGIN = https://你的Tunnel域名        （必填，不要带尾斜杠）
 #   BACKEND_PASS   = 后端系统配置里的访问密码       （可选，未设密码就留空）
 #   BACKEND_PREFIX = 反向代理子路径，如 /iptv        （可选，默认留空）
