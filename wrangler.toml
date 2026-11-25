@@ -9,16 +9,15 @@ upload_source_maps = true
 [assets]
 directory = "./web"
 binding = "ASSETS"
-# 让所有请求先经过 Worker：需要处理根路径跳转、_redirects 重写、安全头注入
+# 让所有请求先经过 Worker：需要处理根路径跳转、静态重写、安全头注入、API
 run_worker_first = true
 
-# 敏感配置请在 Cloudflare 控制台配置，不要写进本文件：
-#   Settings → Environment variables → 添加（Production 与 Preview 都要加）
-#   BACKEND_ORIGIN = https://你的Tunnel域名        （必填，不要带尾斜杠）
-#   BACKEND_PASS   = 后端系统配置里的访问密码       （可选，未设密码就留空）
-#   BACKEND_PREFIX = 反向代理子路径，如 /iptv        （可选，默认留空）
-#
-# 本地调试时，可在项目根目录放 .dev.vars 文件（已加入 .gitignore）：
-#   BACKEND_ORIGIN="http://127.0.0.1:8888"
-#   BACKEND_PASS=""
-#   BACKEND_PREFIX=""
+# KV：订阅源、频道、配置全部存在这里（不再依赖本地 Docker 后端）
+[[kv_namespaces]]
+binding = "IPTV_KV"
+id = "1c84e7b651284d499e5fc36d81f747b7"
+preview_id = "304707adff8b4fcca2af5e324ec49b22"
+
+# ADMIN_PASS：管理页访问密码（可选）。设置后需在请求头带 X-Admin-Pass 才能写操作。
+# 在 Cloudflare 控制台 Settings → Environment variables 添加；本地放 .dev.vars。
+# 注意：此版本为纯 KV 存储，无需 BACKEND_ORIGIN / BACKEND_PASS / BACKEND_PREFIX。

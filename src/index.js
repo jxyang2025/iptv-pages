@@ -1,46 +1,267 @@
 /**
- * iPTV Pages —— 统一 Worker 入口（Cloudflare Workers + Static Assets 模式）
+ * iPTV —— Cloudflare Worker + KV 全托管版（无 Docker 后端）
  *
- * 新向导用 `npx wrangler deploy` 部署，静态资源由 assets.directory=./web 提供，
- * 动态请求由本 Worker 处理。它合并了旧版 Pages Functions 的两个职责：
- *   1) /api/* 同域反代到后端（注入密码路径段鉴权）
- *   2) /m3u、/u/*、/playback.xml、/relay/*、/logos/* 反代
- *   3) 原 _redirects 的重写规则（Workers 静态资源模式不读 _redirects）
+ * 订阅源、频道、配置全部存 KV；Worker 自己抓取订阅 URL、解析 M3U/TXT、
+ * 生成播放列表。前端 web/admin.html 零改动，直接调用同源 /api/*。
  *
- * 环境变量（Cloudflare 控制台 Settings → Environment variables）：
- *   BACKEND_ORIGIN 必填   例如 https://iptv.example.com （Tunnel 域名，不带尾斜杠）
- *   BACKEND_PASS   可选   后端系统配置的访问密码
- *   BACKEND_PREFIX 可选   反代子路径，例如 /iptv
+ * KV 键：
+ *   ext-config      整份外部源配置  {enabled,includeInPlaylists,sources:[...],...}
+ *   channels        频道分组数组    [{name,dataList:[...]}]
+ *   sys-config      系统配置
+ *   built-in        内置源配置
+ *   playlist-config 我的频道配置
+ *   playlist-m3u    生成的 M3U 文本
+ *   其余小配置各占一键（aliases/group-rules/epg/notify/users/extractors/...）
  */
 
-const JSON_HEADERS = { 'Content-Type': 'application/json;charset=UTF-8' };
+const JSON_HEADERS = { 'Content-Type': 'application/json;charset=UTF-8', 'Cache-Control': 'no-store' };
+const TEXT_HEADERS = { 'Content-Type': 'text/plain;charset=UTF-8' };
 
 function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...JSON_HEADERS, 'Cache-Control': 'no-store' },
-  });
+  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+}
+const ok = (data, extra = {}) => json({ success: true, data, ...extra });
+const fail = (message, status = 200) => json({ success: false, message }, status);
+
+// ---------- KV 读写助手 ----------
+const kvGet = async (env, key, fallback) => {
+  try {
+    const v = await env.IPTV_KV.get(key, 'text');
+    return v == null ? fallback : JSON.parse(v);
+  } catch { return fallback; }
+};
+const kvPut = (env, key, val) => env.IPTV_KV.put(key, JSON.stringify(val));
+
+// ---------- 默认配置 ----------
+const DEFAULT_SYS = {
+  port: 0, host: '', pass: '', adminPath: 'admin',
+  programInfoUpdateInterval: '8', enableDisplayNameUnify: false,
+  cctvLogoStyle: 'dark', proxy: '', proxyEnvFallback: false,
+  proxyModules: [], envOverrides: {},
+};
+const DEFAULT_EXT = () => ({
+  enabled: true, includeInPlaylists: true, updateOnStartup: true,
+  sources: [], fetchStatus: {}, proxy: '',
+});
+const DEFAULT_PLAYLIST_CFG = () => ({
+  channelGroupMap: {}, channelRenameMap: {}, channelOrder: {},
+  hiddenChannels: [], customGroups: [], groupOrder: [], deletedGroups: [],
+  groupRenameMap: {}, groupSortMode: {}, hiddenRules: [], keepRules: [],
+  keepRuleSources: [], disabledSources: [],
+});
+const DEFAULT_EXTRACTORS = { enabled: true, modules: [], contentFlags: {} };
+
+// ---------- M3U / TXT 解析（复刻上游 externalSources.js）----------
+function extractExtinfName(line) {
+  const lastQuote = line.lastIndexOf('"');
+  if (lastQuote !== -1) {
+    const after = line.slice(lastQuote + 1);
+    const comma = after.indexOf(',');
+    if (comma !== -1) return after.slice(comma + 1).trim();
+  }
+  const comma = line.indexOf(',');
+  return comma !== -1 ? line.slice(comma + 1).trim() : '';
 }
 
-// 逐跳头与 Cloudflare 内部头：不透传，由平台重新生成
-const HOP_BY_HOP = new Set([
-  'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-  'te', 'trailer', 'transfer-encoding', 'upgrade',
-  'host', 'content-length', 'cf-ray', 'cf-visitor', 'cf-connecting-ip',
-  'cf-ipcountry', 'cf-request-id', 'x-forwarded-for', 'x-forwarded-proto',
-]);
-
-function cleanHeaders(headers) {
-  const out = new Headers();
-  for (const [key, value] of headers) {
-    if (!HOP_BY_HOP.has(key.toLowerCase())) out.set(key, value);
+// 收集 #EXTVLCOPT 等选项，直到下一个非注释行（URL）
+function collectOptsUntilUrl(lines, start) {
+  const opts = [];
+  for (let j = start + 1; j < lines.length; j++) {
+    const l = lines[j];
+    if (!l) continue;
+    if (l.startsWith('#')) {
+      const m = l.match(/^#EXTVLCOPT:(.*)$/i);
+      if (m) opts.push(m[1].trim());
+      continue;
+    }
+    return { opts, urlIndex: j };
   }
+  return { opts, urlIndex: -1 };
+}
+
+function parseCatchupAttrs(line) {
+  const out = {};
+  const m1 = line.match(/catchup="([^"]*)"/i);
+  const m2 = line.match(/catchup-days="?(\d+)"?/i);
+  const m3 = line.match(/catchup-source="([^"]*)"/i);
+  if (m1) out.catchup = m1[1];
+  if (m2) out.catchupDays = parseInt(m2[1], 10);
+  if (m3) out.catchupSource = m3[1];
   return out;
 }
+function resolveCatchup(header, line) {
+  const inline = parseCatchupAttrs(line);
+  return { ...header, ...inline };
+}
 
+function parseM3uContent(content) {
+  const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+  const channels = [];
+  let headerCatchup = {};
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\uFEFF?#EXTM3U/i.test(line)) { headerCatchup = parseCatchupAttrs(line); continue; }
+    if (!line.startsWith('#EXTINF:')) continue;
+    const groupMatch = line.match(/group-title="([^"]*)"/);
+    const logoMatch = line.match(/tvg-logo="([^"]*)"/);
+    const tvgNameMatch = line.match(/tvg-name="([^"]*)"/);
+    const tvgIdMatch = line.match(/tvg-id="([^"]*)"/);
+    const topFirst = /\sx-top-first="(?:1|true)"/i.test(line);
+    const name = extractExtinfName(line);
+    const catchup = resolveCatchup(headerCatchup, line);
+    const { opts, urlIndex } = collectOptsUntilUrl(lines, i);
+    const url = urlIndex === -1 ? '' : lines[urlIndex];
+    if (url && name) {
+      channels.push({
+        name,
+        group: groupMatch ? groupMatch[1] : '未分组',
+        logo: logoMatch ? logoMatch[1] : '',
+        url,
+        ...(tvgNameMatch ? { tvgName: tvgNameMatch[1] } : {}),
+        ...(tvgIdMatch ? { tvgId: tvgIdMatch[1] } : {}),
+        ...(opts.length ? { opts } : {}),
+        ...(topFirst ? { topFirst: true } : {}),
+        ...catchup,
+      });
+    }
+  }
+  return channels;
+}
+
+function parseTxtContent(content) {
+  const lines = content.split(/\r?\n/).map(l => l.trim()).filter(l => l);
+  const channels = [];
+  let currentGroup = '';
+  for (const line of lines) {
+    if (line.startsWith('#')) continue;
+    const comma = line.indexOf(',');
+    if (comma === -1) continue;
+    const name = line.slice(0, comma).trim();
+    const rest = line.slice(comma + 1).trim();
+    if (!name || !rest) continue;
+    if (rest.toLowerCase() === '#genre#') { currentGroup = name; continue; }
+    const url = rest.split('#')[0].trim();
+    if (!url || !url.includes('://')) continue;
+    channels.push({ name, group: currentGroup, logo: '', url });
+  }
+  return channels;
+}
+
+function parsePlaylistContent(content) {
+  const head = content.replace(/^\uFEFF/, '');
+  if (/^#EXTM3U/i.test(head) || /#EXTINF:/i.test(head)) return parseM3uContent(content);
+  return parseTxtContent(content);
+}
+
+// 解码订阅内容（UTF-8 / GBK 简单处理： Workers TextDecoder 支持 gbk）
+function decodeBody(buf, contentType) {
+  const encMatch = /charset=([\w-]+)/i.exec(contentType || '');
+  let enc = (encMatch ? encMatch[1] : 'utf-8').toLowerCase();
+  if (enc === 'gb2312') enc = 'gbk';
+  try { return new TextDecoder(enc).decode(buf); }
+  catch { return new TextDecoder('utf-8').decode(buf); }
+}
+
+// ---------- 抓取订阅 ----------
+async function fetchSubscription(source) {
+  const url = source.subscriptionUrl || source.m3u8Url || '';
+  if (!url) throw new Error('未配置订阅地址');
+  const ctrl = new AbortController();
+  const timeoutMs = Math.min(60000, Math.max(5000, Number(source.fetchTimeout) * 1000 || 15000));
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': source.userAgent || 'Mozilla/5.0 (IPTV; Cloudflare Worker)' },
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const buf = await resp.arrayBuffer();
+    const content = decodeBody(buf, resp.headers.get('content-type'));
+    const channels = parsePlaylistContent(content);
+    if (!channels.length) throw new Error('未解析出任何频道');
+    return { channels, content };
+  } finally { clearTimeout(timer); }
+}
+
+// ---------- 生成播放列表 ----------
+function stableId(name, url) {
+  let h = 5381;
+  const s = `${name}|${url}`;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+// 把 ext-config + channels 重新生成为 M3U 文本
+function buildM3u(extConfig, channels, sysConfig) {
+  const lines = ['#EXTM3U'];
+  const groups = Array.isArray(channels) ? channels : [];
+  for (const g of groups) {
+    for (const ch of (g.dataList || [])) {
+      const attrs = [];
+      if (ch.tvgId) attrs.push(`tvg-id="${ch.tvgId}"`);
+      if (ch.tvgName || ch.name) attrs.push(`tvg-name="${ch.tvgName || ch.name}"`);
+      if (ch.logo) attrs.push(`tvg-logo="${ch.logo}"`);
+      attrs.push(`group-title="${g.name || ch.group || '未分组'}"`);
+      if (ch.catchup) attrs.push(`catchup="${ch.catchup}"`);
+      if (ch.catchupDays) attrs.push(`catchup-days="${ch.catchupDays}"`);
+      if (ch.catchupSource) attrs.push(`catchup-source="${ch.catchupSource}"`);
+      lines.push(`#EXTINF:-1 ${attrs.join(' ')},${ch.name}`);
+      if (Array.isArray(ch.opts)) for (const o of ch.opts) lines.push(`#EXTVLCOPT:${o}`);
+      lines.push(ch.url);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+// 从外部源配置重建频道分组数组
+function rebuildChannels(extConfig) {
+  const groups = new Map();
+  const sources = Array.isArray(extConfig.sources) ? extConfig.sources : [];
+  for (const src of sources) {
+    if (src.enabled === false) continue;
+    if (src.mode === 'subscription' && Array.isArray(src.parsedChannels)) {
+      for (const ch of src.parsedChannels) {
+        const gname = src.ignoreGroups ? '未分组' : (ch.group && ch.group !== '未分组' ? ch.group : (src.group || '未分组'));
+        if (!groups.has(gname)) groups.set(gname, []);
+        groups.get(gname).push({
+          id: ch.id || stableId(ch.name, ch.url),
+          name: ch.name, url: ch.url, group: gname,
+          ...(ch.logo ? { logo: ch.logo } : {}),
+          ...(ch.opts ? { opts: ch.opts } : {}),
+        });
+      }
+    } else if ((src.mode === 'direct' || src.mode === 'fetch') && src.m3u8Url) {
+      const gname = src.group || '未分组';
+      if (!groups.has(gname)) groups.set(gname, []);
+      groups.get(gname).push({
+        id: src.id || stableId(src.name, src.m3u8Url),
+        name: src.name || '未命名', url: src.m3u8Url, group: gname,
+      });
+    }
+  }
+  return [...groups.entries()].map(([name, dataList]) => ({ name, dataList }));
+}
+
+// 保存配置后同步重建频道 + M3U
+async function persistAndRebuild(env, extConfig) {
+  await kvPut(env, 'ext-config', extConfig);
+  const channels = rebuildChannels(extConfig);
+  await kvPut(env, 'channels', channels);
+  const sys = await kvGet(env, 'sys-config', DEFAULT_SYS);
+  // M3U 是纯文本，直接存 raw（不要走 kvPut 的 JSON.stringify，否则读出来带引号）
+  await env.IPTV_KV.put('playlist-m3u', buildM3u(extConfig, channels, sys));
+}
+
+// ---------- 鉴权（可选管理员口令）----------
+function authorized(request, env) {
+  const required = String(env.ADMIN_PASS || '');
+  if (!required) return true;
+  return request.headers.get('X-Admin-Pass') === required
+    || (request.headers.get('Authorization') || '') === `Bearer ${required}`;
+}
+
+// ---------- 安全头 ----------
 function addSecurityHeaders(response, pathname) {
-  // ASSETS.fetch() 返回的 Response headers 是 immutable 的，直接 set 会抛
-  // "Can't modify immutable headers"，必须先复制成可变的 Headers 再重建 Response。
   const h = new Headers(response.headers);
   if (!h.has('X-Content-Type-Options')) h.set('X-Content-Type-Options', 'nosniff');
   if (!h.has('Referrer-Policy')) h.set('Referrer-Policy', 'no-referrer');
@@ -48,19 +269,11 @@ function addSecurityHeaders(response, pathname) {
   if (/^\/(admin|player)(\.html)?\/?$/.test(pathname) || pathname === '/') {
     h.set('Cache-Control', 'no-store');
   }
-  // 204/304 等状态码不允许带 body，需传 null
   const body = [204, 304].includes(response.status) ? null : response.body;
-  return new Response(body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers: h,
-  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: h });
 }
 
-// 静态重写（内部改写路径，URL 不变）
-// 注意：不要重写 /admin、/player 到 .html —— Workers Assets 内置 clean URL 行为，
-// 会把 /admin.html 307 到 /admin；若我们再重写回来会形成无限循环。
-// /admin、/player 直接交给 ASSETS，它会自动映射到 admin.html / player.html。
+// ---------- 静态重写 ----------
 const STATIC_REWRITES = new Map([
   ['/player-assets/mpegts.js', '/vendor/mpegts.js'],
   ['/player-assets/hls.min.js', '/vendor/hls.min.js'],
@@ -72,83 +285,208 @@ const STATIC_REWRITES = new Map([
   ['/apple-touch-icon.png', '/icons/apple-touch-icon.png'],
 ]);
 
-// 需要反代到后端的动态路径
-const DYNAMIC = /^(api|m3u|interface\.m3u|playback\.xml|txt|u|relay|logos)(\/|$)/i;
-// 只有这些「站长订阅出口」需要注入密码；/u/<token>、/relay、/logos 靠各自路径首段解析
-const NEEDS_PASS = /^(m3u|interface\.m3u|playback\.xml|txt)(\/|$)/i;
+// ================= API 路由 =================
+async function handleApi(request, env, url, rel) {
+  const method = request.method;
+  let body = {};
+  if (method === 'POST' || method === 'PUT') {
+    try { body = await request.json(); } catch { return fail('JSON 解析失败'); }
+  }
+  const seg = rel.replace(/^api\/?/i, '').replace(/\/$/, '');
 
-async function proxyToBackend(request, env, url, pathname, search) {
-  const origin = String(env.BACKEND_ORIGIN || '').replace(/\/+$/, '');
-  if (!origin) return json({ success: false, message: 'BACKEND_ORIGIN 未配置' }, 500);
-
-  const prefix = String(env.BACKEND_PREFIX || '').replace(/^\/+|\/+$/g, '');
-  const pass = NEEDS_PASS.test(pathname)
-    ? String(env.BACKEND_PASS || '').replace(/^\/+|\/+$/g, '') : '';
-
-  const segments = [prefix, pass, pathname].filter(Boolean)
-    .map(s => encodeURI(decodeURIComponent(s))).join('/');
-  const target = `${origin}/${segments}${search}`;
-
-  const init = {
-    method: request.method,
-    headers: cleanHeaders(request.headers),
-    redirect: 'manual',
-  };
-  if (!['GET', 'HEAD'].includes(request.method)) {
-    init.body = request.body;
-    init.duplex = 'half';
+  // 硬门槛 GET（页面初始化必须 200）
+  if (seg === 'channels' && method === 'GET') {
+    return json(await kvGet(env, 'channels', [])); // 裸数组
+  }
+  if (seg === 'system-config' && method === 'GET') {
+    return json(await kvGet(env, 'sys-config', DEFAULT_SYS)); // 裸对象
+  }
+  if (seg === 'system-config' && method === 'POST') {
+    if (!authorized(request, env)) return fail('未授权', 403);
+    const cur = await kvGet(env, 'sys-config', DEFAULT_SYS);
+    const next = { ...cur, ...body };
+    delete next.proxyModules; delete next.envOverrides; // 只读字段不固化
+    await kvPut(env, 'sys-config', next);
+    return ok(next, { message: '已保存', entry: url.pathname.replace(/\/admin\/?$/, '') || '/admin', apiPrefix: '' });
+  }
+  if (seg === 'external-sources' && method === 'GET') {
+    const cfg = await kvGet(env, 'ext-config', DEFAULT_EXT());
+    return json(cfg); // 裸对象，顶层带 fetchStatus/proxy
+  }
+  if (seg === 'external-sources' && method === 'POST') {
+    if (!authorized(request, env)) return fail('未授权', 403);
+    return handleExternalSources(env, body);
+  }
+  if (seg === 'built-in-sources' && method === 'GET') {
+    const v = await kvGet(env, 'built-in', { enabled: true, sources: [], builtInSubscriptionUrls: [] });
+    return ok(v);
   }
 
-  try {
-    const upstream = await fetch(target, init);
-    const outHeaders = cleanHeaders(upstream.headers);
-    outHeaders.set('Access-Control-Allow-Origin', '*');
-    outHeaders.set('Cache-Control',
-      pathname.toLowerCase().startsWith('logos/') ? 'public, max-age=86400' : 'no-store');
-    return new Response(upstream.body, {
-      status: upstream.status,
-      statusText: upstream.statusText,
-      headers: outHeaders,
-    });
-  } catch (err) {
-    return json({
-      success: false,
-      message: '后端不可达，请检查 BACKEND_ORIGIN 与 Tunnel 状态',
-      error: String(err && err.message ? err.message : err),
-    }, 502);
+  // 我的频道配置 / 播放列表
+  if (seg === 'my-playlist-config' && method === 'GET') return ok(await kvGet(env, 'playlist-config', DEFAULT_PLAYLIST_CFG()));
+  if (seg === 'my-playlist-config' && method === 'POST') {
+    if (!authorized(request, env)) return fail('未授权', 403);
+    await kvPut(env, 'playlist-config', body);
+    return ok(body, { message: '已保存' });
   }
+  if (seg === 'my-playlist' && method === 'GET') {
+    const channels = await kvGet(env, 'channels', []);
+    return ok(channels, { originalData: channels, hiddenCustomGroups: [] });
+  }
+  if (seg === 'my-playlist-profiles' && method === 'GET') return ok([{ id: 'default', name: '默认' }]);
+  if (seg === 'my-playlist-profiles' && method === 'POST') return ok(null, { message: '已保存' });
+  if (seg === 'source-profiles' && method === 'GET') {
+    return ok({ sources: [], profiles: [{ id: 'default', name: '默认' }], disabled: {} });
+  }
+  if (seg === 'source-profiles' && method === 'POST') {
+    return ok({ profileId: body.profileId || 'default', disabledSources: [] });
+  }
+
+  // 二次配置：返回结构正确的空值，保证对应标签页可用
+  if (seg === 'alerts') return ok([]);
+  if (seg === 'epg-sources') {
+    const d = { enabled: false, sources: [] };
+    if (method === 'GET') return ok(d, { legacyUrls: [], defaultUrl: '' });
+    return ok(body.data || d, { message: '已保存' });
+  }
+  if (seg === 'notify') {
+    const d = { channels: [], types: [], templates: [] };
+    return method === 'GET' ? ok(d) : ok(body.channel ? d : (body.data || d), { message: '已保存' });
+  }
+  if (seg === 'users') {
+    const d = { users: [], passSet: !!String((await kvGet(env, 'sys-config', DEFAULT_SYS)).pass || '') };
+    return method === 'GET' ? ok(d) : ok(d, { message: '已保存' });
+  }
+  if (seg === 'channel-aliases') return method === 'GET' ? ok({}) : ok(body.data || {}, { message: '已保存' });
+  if (seg === 'group-keyword-rules') return method === 'GET' ? ok([]) : ok(body.data || [], { message: '已保存' });
+  if (seg === 'extractors') return method === 'GET' ? ok(DEFAULT_EXTRACTORS) : ok(body.data || DEFAULT_EXTRACTORS, { message: '已保存' });
+
+  // 其余次要端点
+  if (seg === 'check-update') return fail('Worker 模式跳过更新检查');
+  if (seg === 'restart') return ok(null, { message: 'Worker 模式无需重启' });
+  if (seg === 'core-dumps/clean') return ok(null, { count: 0, bytes: 0 });
+  if (seg === 'proxy-test') return ok(null, { via: '', results: [], message: 'Worker 模式无需代理测试' });
+  if (seg === 'config-backup') {
+    if (method === 'GET') {
+      const files = {
+        'ext-config.json': await env.IPTV_KV.get('ext-config', 'text'),
+        'system-config.json': await env.IPTV_KV.get('sys-config', 'text'),
+      };
+      return ok({ files, skipped: [] });
+    }
+    if (!authorized(request, env)) return fail('未授权', 403);
+    const files = body.files || {};
+    if (files['ext-config.json']) await env.IPTV_KV.put('ext-config', files['ext-config.json']);
+    if (files['system-config.json']) await env.IPTV_KV.put('sys-config', files['system-config.json']);
+    return ok(null, { message: '已恢复' });
+  }
+  if (seg === 'upload-logo' || seg === 'remove-logo' || seg === 'copy-channel') return fail('Worker 模式暂不支持');
+
+  return fail(`未知 API: /api/${seg}`, 404);
 }
 
+// ---------- 外部源：保存 + 导入订阅 ----------
+async function handleExternalSources(env, body) {
+  const action = body.action || 'save';
+  const cfg = await kvGet(env, 'ext-config', DEFAULT_EXT());
+
+  if (action === 'save') {
+    const incoming = body.sources;
+    // sources 可能是整份配置对象，也可能是裸数组
+    const next = (incoming && !Array.isArray(incoming) && typeof incoming === 'object')
+      ? { ...DEFAULT_EXT(), ...incoming }
+      : { ...cfg, sources: Array.isArray(incoming) ? incoming : [] };
+    // 给新源补稳定 id
+    next.sources = next.sources.map((s, i) => ({
+      ...s,
+      id: s.id || `ext_${Date.now().toString(36)}_${i}`,
+    }));
+    await persistAndRebuild(env, next);
+    return ok(next, { message: '已保存' });
+  }
+
+  if (action === 'importSubscription') {
+    const idx = Number(body.index);
+    const src = cfg.sources[idx];
+    if (!src) return fail('找不到该订阅源');
+    if (!src.subscriptionUrl && !src.localImport) return fail('未填写订阅地址');
+    try {
+      let channels;
+      if (src.localImport && src.subscriptionContent) {
+        channels = parsePlaylistContent(src.subscriptionContent);
+      } else {
+        channels = (await fetchSubscription(src)).channels;
+      }
+      if (!channels.length) return fail('未解析出任何频道');
+      cfg.sources[idx].parsedChannels = channels;
+      cfg.sources[idx].lastUpdated = Date.now();
+      await persistAndRebuild(env, cfg);
+      return ok(cfg, { message: `成功导入 ${channels.length} 个频道`, channelCount: channels.length });
+    } catch (e) {
+      return fail(`导入失败：${e && e.message ? e.message : e}`);
+    }
+  }
+
+  if (action === 'parseLocalContent') {
+    try {
+      const raw = body.contentBase64 || '';
+      const buf = Uint8Array.from(atob(raw), c => c.charCodeAt(0));
+      const text = decodeBody(buf.buffer, 'text/plain;charset=utf-8');
+      const channels = parsePlaylistContent(text);
+      return ok(text, { text, channelCount: channels.length, success: true });
+    } catch (e) { return fail(`解析失败：${e.message}`); }
+  }
+
+  if (action === 'probeStatus') return ok({ state: 'idle' });
+  if (action === 'probeCancel') return ok(null);
+  if (action === 'probeStart') return fail('Worker 模式暂不支持失效检测');
+
+  return fail(`未知操作: ${action}`);
+}
+
+// ================= 播放列表输出 =================
+async function handlePlaylistOut(env, url, rel) {
+  const first = rel.split('/')[0].toLowerCase();
+  if (first === 'm3u' || first === 'interface.m3u' || first === 'txt') {
+    const m3u = await env.IPTV_KV.get('playlist-m3u', 'text');
+    const headers = { ...TEXT_HEADERS, 'Content-Disposition': 'inline; filename="interface.m3u"' };
+    return new Response(m3u || '#EXTM3U\n', { headers });
+  }
+  if (first === 'playback.xml') {
+    return new Response('<?xml version="1.0" encoding="UTF-8"?><tv></tv>', {
+      headers: { 'Content-Type': 'application/xml;charset=UTF-8' },
+    });
+  }
+  if (first === 'logos' || first === 'u' || first === 'relay') {
+    return new Response('Not Found', { status: 404 });
+  }
+  return new Response('Not Found', { status: 404 });
+}
+
+// ================= Worker 入口 =================
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    // pathname 去掉开头斜杠，例如 /api/channels -> api/channels
     const rel = url.pathname.replace(/^\/+/, '');
     const first = rel.split('/')[0] || '';
 
-    // 根路径：跳转到管理页（用 clean URL /admin，避免 assets 把 /admin.html 307 回去形成循环）
     if (url.pathname === '/') {
-      return new Response(null, {
-        status: 302,
-        headers: { Location: '/admin', 'Cache-Control': 'no-store' },
-      });
+      return new Response(null, { status: 302, headers: { Location: '/admin', 'Cache-Control': 'no-store' } });
     }
 
-    // 动态路径 → 反代后端
-    if (DYNAMIC.test(rel)) {
-      return proxyToBackend(request, env, url, rel, url.search);
+    if (/^api(\/|$)/i.test(first)) {
+      return handleApi(request, env, url, rel);
+    }
+    if (/^(m3u|interface\.m3u|playback\.xml|txt|u|relay|logos)(\/|$)/i.test(first)) {
+      return handlePlaylistOut(env, url, rel);
     }
 
-    // 静态重写：把请求路径换成目标资源路径，交给 ASSETS
     const rewritten = STATIC_REWRITES.get(url.pathname);
     if (rewritten) {
       const assetReq = new Request(new URL(rewritten, url.origin), request);
       const res = await env.ASSETS.fetch(assetReq);
       if (res.status !== 404) return addSecurityHeaders(res, url.pathname);
-      // 目标不存在则继续走原路径，让 ASSETS 兜底
     }
-
-    // 其余：静态资源
     const res = await env.ASSETS.fetch(request);
     return addSecurityHeaders(res, url.pathname);
   },
