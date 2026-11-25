@@ -85,9 +85,15 @@ git push -u origin main
 
 | 配置项 | 值 |
 |---|---|
+| Deploy command | **留空**（不要填任何命令，详见下方「常见报错」） |
 | Build command | 留空（纯静态，无需构建） |
 | Build output directory | `web` |
+| Root directory | 留空 `/` |
 | Functions directory | `functions`（默认即可） |
+
+> ⚠️ **不要填写 Deploy command**。本项目是纯静态 + Pages Functions，Git 集成会自动上传 `web/` 并注册 `functions/`。
+> 如果填了 `npx wrangler deploy`（Workers 的部署命令），会报 `Missing entry-point to Worker script or to assets directory` 而构建失败。
+> 若确实要用命令行手动部署，正确命令是 `npx wrangler pages deploy web --project-name=iptv-pages`（注意是 `pages deploy`）。
 
 ### 第 4 步：配置环境变量
 
