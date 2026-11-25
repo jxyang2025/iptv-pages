@@ -39,17 +39,28 @@ function cleanHeaders(headers) {
 }
 
 function addSecurityHeaders(response, pathname) {
-  const h = response.headers;
+  // ASSETS.fetch() 返回的 Response headers 是 immutable 的，直接 set 会抛
+  // "Can't modify immutable headers"，必须先复制成可变的 Headers 再重建 Response。
+  const h = new Headers(response.headers);
   if (!h.has('X-Content-Type-Options')) h.set('X-Content-Type-Options', 'nosniff');
   if (!h.has('Referrer-Policy')) h.set('Referrer-Policy', 'no-referrer');
   if (!h.has('X-Frame-Options')) h.set('X-Frame-Options', 'SAMEORIGIN');
-  if (pathname === '/admin.html' || pathname === '/player.html' || pathname === '/') {
+  if (/^\/(admin|player)(\.html)?\/?$/.test(pathname) || pathname === '/') {
     h.set('Cache-Control', 'no-store');
   }
-  return response;
+  // 204/304 等状态码不允许带 body，需传 null
+  const body = [204, 304].includes(response.status) ? null : response.body;
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: h,
+  });
 }
 
-// 原 _redirects：静态重写（内部改写路径，URL 不变）
+// 静态重写（内部改写路径，URL 不变）
+// 注意：不要重写 /admin、/player 到 .html —— Workers Assets 内置 clean URL 行为，
+// 会把 /admin.html 307 到 /admin；若我们再重写回来会形成无限循环。
+// /admin、/player 直接交给 ASSETS，它会自动映射到 admin.html / player.html。
 const STATIC_REWRITES = new Map([
   ['/player-assets/mpegts.js', '/vendor/mpegts.js'],
   ['/player-assets/hls.min.js', '/vendor/hls.min.js'],
@@ -59,8 +70,6 @@ const STATIC_REWRITES = new Map([
   ['/favicon.ico', '/icons/favicon.ico'],
   ['/favicon.svg', '/icons/favicon.svg'],
   ['/apple-touch-icon.png', '/icons/apple-touch-icon.png'],
-  ['/admin', '/admin.html'],
-  ['/player', '/player.html'],
 ]);
 
 // 需要反代到后端的动态路径
@@ -117,11 +126,11 @@ export default {
     const rel = url.pathname.replace(/^\/+/, '');
     const first = rel.split('/')[0] || '';
 
-    // 根路径：跳转到管理页
+    // 根路径：跳转到管理页（用 clean URL /admin，避免 assets 把 /admin.html 307 回去形成循环）
     if (url.pathname === '/') {
       return new Response(null, {
         status: 302,
-        headers: { Location: '/admin.html', 'Cache-Control': 'no-store' },
+        headers: { Location: '/admin', 'Cache-Control': 'no-store' },
       });
     }
 
