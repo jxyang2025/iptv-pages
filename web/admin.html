@@ -3803,8 +3803,6 @@
         .about-version-card .about-card-heading { margin-bottom: 0; }
         .about-version-body { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
         .about-panel #versionText { color: var(--ui-text); font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
-        .about-panel #checkUpdateBtn { background: var(--ui-surface); }
-        .about-panel #checkUpdateBtn:hover:not(:disabled) { background: var(--ui-surface-soft); }
         .about-update-info { grid-column: 1 / -1; padding-left: 46px; font-size: 13px; line-height: 1.8; overflow-wrap: anywhere; }
         .about-community-card { grid-column: 1 / -1; }
         .about-community-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; padding-left: 46px; }
@@ -4279,7 +4277,7 @@
         </div>
     </div>
 
-    <!-- 按名字屏蔽频道的规则弹窗（issue #123）；「只保留」标签页见 2026-11-23 Telegram 群 -->
+    <!-- 按名字屏蔽频道的规则弹窗（issue #123） -->
     <div class="modal" id="hiddenRuleModal">
         <div class="modal-content" style="width: 620px; max-width: 92%;">
             <h3>🚫 屏蔽规则 <span style="font-size:13px;font-weight:normal;color:var(--ui-subtle);">当前档：<span id="hiddenRuleProfileLabel">默认</span></span></h3>
@@ -4683,7 +4681,7 @@
         <div class="header-shell">
             <div class="header">
                 <div class="tabs">
-                    <a class="brand" href="https://ifansclub.com/" target="_blank" rel="noopener noreferrer" aria-label="iFansClub 官网（在新标签页打开）" title="访问 iFansClub 官网（新标签页）">
+                    <a class="brand" href="./" aria-label="返回管理首页" title="返回管理首页">
                         <img class="brand-mark" src="icon-512.png?v=2" width="44" height="44" alt="" aria-hidden="true">
                     </a>
                     <div class="tabs-left">
@@ -5114,10 +5112,9 @@
                                 <strong>当前版本</strong>
                             </div>
                             <div class="about-version-body">
-                                <span id="versionText">v4.83.0</span>
-                                <button class="btn btn-sm" onclick="checkUpdate()" id="checkUpdateBtn">检查更新</button>
+                                <span id="versionText">Cloudflare 版</span>
                             </div>
-                            <div id="updateInfo" class="about-update-info" style="display: none;"></div>
+                            <div class="about-card-content">运行在 Cloudflare Workers，订阅与配置保存在 KV，无需 Docker 或常驻进程。</div>
                         </div>
 
                         <div>
@@ -5131,7 +5128,7 @@
                                 <strong>项目地址</strong>
                             </div>
                             <div class="about-card-content">
-                                <a href="https://github.com/akiralereal/iptv" target="_blank" rel="noopener noreferrer">https://github.com/akiralereal/iptv</a>
+                                <a href="https://github.com/jxyang2025/iptv-pages" target="_blank" rel="noopener noreferrer">https://github.com/jxyang2025/iptv-pages</a>
                             </div>
                         </div>
 
@@ -5143,11 +5140,9 @@
                                         <path d="M7 7V4h10v3M7 11v5m5-5v5m5-5v5" />
                                     </svg>
                                 </span>
-                                <strong>Docker 镜像</strong>
+                                <strong>部署方式</strong>
                             </div>
-                            <div class="about-card-content">
-                                <a href="https://hub.docker.com/r/akiralereal/iptv" target="_blank" rel="noopener noreferrer">https://hub.docker.com/r/akiralereal/iptv</a>
-                            </div>
+                            <div class="about-card-content">Cloudflare Workers + KV，无 Docker、无源站、无常驻进程。</div>
                         </div>
 
                         <div>
@@ -5157,10 +5152,10 @@
                                         <circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a17 17 0 0 1 0 18 17 17 0 0 1 0-18Z" />
                                     </svg>
                                 </span>
-                                <strong>了解更多</strong>
+                                <strong>使用文档</strong>
                             </div>
                             <div class="about-card-content">
-                                <a href="https://ifansclub.com/" target="_blank" rel="noopener noreferrer">https://ifansclub.com/</a>
+                                <a href="https://github.com/jxyang2025/iptv-pages#readme" target="_blank" rel="noopener noreferrer">项目 README</a>
                             </div>
                         </div>
 
@@ -5171,33 +5166,10 @@
                                         <rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" />
                                     </svg>
                                 </span>
-                                <strong>联系邮箱</strong>
+                                <strong>问题反馈</strong>
                             </div>
                             <div class="about-card-content">
-                                <a href="mailto:contact@ifansclub.com">contact@ifansclub.com</a>
-                            </div>
-                        </div>
-
-                        <div class="about-community-card">
-                            <div class="about-card-heading">
-                                <span class="about-card-icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" focusable="false">
-                                        <path d="m22 2-7 20-4-9-9-4Z" /><path d="M22 2 11 13" />
-                                    </svg>
-                                </span>
-                                <strong>Telegram</strong>
-                            </div>
-                            <div class="about-community-grid">
-                                <div class="about-community-entry">
-                                    <div class="about-community-copy">
-                                        <strong class="about-community-name">用户交流群</strong>
-                                        <span class="about-community-handle">@iFansClubChat</span>
-                                    </div>
-                                    <a class="btn btn-sm btn-primary about-community-link" href="https://t.me/iFansClubChat" target="_blank" rel="noopener noreferrer" aria-label="加入 iFansClub Telegram 交流群（新标签页）">
-                                        加入群聊
-                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 17 17 7M7 7h10v10" /></svg>
-                                    </a>
-                                </div>
+                                <a href="https://github.com/jxyang2025/iptv-pages/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a>
                             </div>
                         </div>
                     </div>
@@ -8124,7 +8096,7 @@
             return out;
         }
 
-        // ===== 只保留匹配项（2026-11-23 Telegram 群）=====
+        // ===== 只保留匹配项 =====
         // 勾选的来源只留名字命中只保留规则的频道，源以后新加的也一样；没勾的来源不受影响。
         // 语义与服务端 utils/hiddenRules.js createKeepFilter 逐字一致：没勾来源或没有规则 = 不生效；
         // 频道的所有来源都在勾选范围内才管（与按档禁用源同一判法）；屏蔽规则优先。
@@ -9000,16 +8972,6 @@
             addCard.innerHTML = '<span class="plus">＋</span><span>添加自定义源</span>';
             externalSourceList.insertBefore(addCard, externalSourceList.firstChild);
 
-            // 「网络分享」快捷入口：还没订阅过才显示；订阅过（含刚填好未保存的）它就是一张普通卡片。
-            if (findFromTheWebSource() === -1) {
-                const ftwCard = document.createElement('div');
-                ftwCard.className = 'source-card-add';
-                ftwCard.title = '一键填好仓库 from-the-web 列表的订阅地址，再点「导入并保存」即可';
-                ftwCard.onclick = () => addFromTheWebSource();
-                ftwCard.innerHTML = '<span class="plus"></span><span>添加「网络分享」列表</span><small>港澳台、新马、影视等网络第三方频道</small>';
-                addCard.after(ftwCard);
-            }
-
             // 详情只在有选中项时展开。**不再「默认选中第一个」**，避免一进入分类
             // 就被长表单占满，先让用户看清源列表再决定编辑哪一项。
             // 选中项指向已隐藏的内置订阅时收起：遗留状态（老版本存下来的下标、
@@ -9490,11 +9452,6 @@
                             ${!source.localImport ? `
                             <input type="text" value="${source.subscriptionUrl || ''}" oninput="updateExternalField(${index}, 'subscriptionUrl', this.value)" placeholder="例：https://example.com/playlist.m3u 或 .txt">
                             <div class="form-hint">填写包含多个频道的 m3u/m3u8 或 txt（频道名,地址）播放列表地址，系统会自动识别格式并解析其中的所有频道</div>
-                            ${isFromTheWebUrl(source.subscriptionUrl) ? `
-                            <div style="margin-top:8px;padding:8px 10px;background:var(--ui-warning-soft);border:1px solid var(--ui-warning-line);border-radius:4px;font-size:12px;color:var(--ui-warning);line-height:1.6;">
-                                这是仓库 from-the-web 里的<strong>网络源订阅</strong>，包含第三方转发源、平台分发源及来源待确认的 CDN。第三方转发站国内直连大多播不了，其他线路按各自情况判断；需要代理时，可使用海外网络、路由器全局代理，或填好「设置 → 网络代理」后勾下方「经网络代理转发」；本项目不维护，失效不作为 bug 处理。不想要了删掉这条订阅即可。<a href="${FROM_THE_WEB_README}" target="_blank" rel="noopener">收录范围 ↗</a>
-                            </div>` : (!isSaved && findFromTheWebSource(index) === -1 ? `
-                            <div class="form-hint">想加回以前精选列表里的港澳台、新马、影视等网络第三方频道？<a href="javascript:void(0)" onclick="fillFromTheWeb(${index})">一键填入「网络分享」列表</a></div>` : '')}
                             ` : `
                             <input type="file" accept=".m3u,.m3u8,.txt,text/plain" onchange="onLocalFilePicked(${index}, this)" style="margin-bottom: 8px;">
                             <textarea oninput="updateExternalField(${index}, 'subscriptionContent', this.value)" placeholder="选择本地 .m3u/.m3u8/.txt 文件，或直接把播放列表内容粘贴到这里（支持 m3u/m3u8 与 txt「频道名,地址」格式，自动识别 GBK/UTF-8 编码）" style="width: 100%; min-height: 120px; font-family: monospace; font-size: 12px; box-sizing: border-box;">${(source.subscriptionContent || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}</textarea>
@@ -9688,58 +9645,7 @@
             renderExternalSources();
         }
 
-        // 「网络分享」列表（issue #121）：清出精选列表的第三方转发源放在仓库 from-the-web/，
-        // 镜像不带这个目录，只能订阅 GitHub 直链。公告里的教程是视频，地址没法复制，这里给一键填入。
-        const FROM_THE_WEB_URL = 'https://raw.githubusercontent.com/akiralereal/iptv/main/from-the-web/from-the-web.m3u';
-        const FROM_THE_WEB_README = 'https://github.com/akiralereal/iptv/tree/main/from-the-web';
-
-        function isFromTheWebUrl(url) {
-            return /\/from-the-web\/from-the-web\.m3u(\?|#|$)/.test(String(url || '').trim());
-        }
-
-        function findFromTheWebSource(exceptIndex = -1) {
-            return externalConfig.sources.findIndex((source, index) => index !== exceptIndex
-                && source && source.mode === 'subscription' && isFromTheWebUrl(source.subscriptionUrl));
-        }
-
-        function addFromTheWebSource() {
-            const existing = findFromTheWebSource();
-            if (existing !== -1) {
-                selectExternalSource(existing);
-                return;
-            }
-            externalConfig.sources.unshift({
-                name: '网络分享',
-                group: '未分组',
-                enabled: true,
-                mode: 'subscription',
-                subscriptionUrl: FROM_THE_WEB_URL,
-                webUrl: '',
-                m3u8Url: '',
-                autoRefresh: true,
-                refreshInterval: 1440,
-                updateOnStartup: true,
-            });
-            selectedExternalIndex = 0;
-            setSaveDirty('ext');
-            renderExternalSources();
-            const wrap = document.getElementById('externalDetailWrap');
-            if (wrap) wrap.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-
-        // 走「＋ 添加自定义源 → 订阅模式」老路径（教程视频演示的就是这条）的人，在地址框下直接填入
-        function fillFromTheWeb(index) {
-            const source = externalConfig.sources[index];
-            if (!source) return;
-            if (findFromTheWebSource(index) !== -1) {
-                showStatus('已经添加过「网络分享」列表，不用再加一次', 'info');
-                return;
-            }
-            source.subscriptionUrl = FROM_THE_WEB_URL;
-            if (!source.name || !source.name.trim()) source.name = '网络分享';
-            setSaveDirty('ext');
-            renderExternalSources();
-        }
+        // 已移除上游仓库的「网络分享」快捷入口；本项目只使用用户自己填写的订阅地址。
 
         function switchSourceMode(index, newMode) {
             const source = externalConfig.sources[index];
@@ -10985,45 +10891,6 @@ if(success){
             }
         }
 
-        // 检查更新
-        async function checkUpdate() {
-            const versionEl = document.getElementById('versionText');
-            const updateBtn = document.getElementById('checkUpdateBtn');
-            const updateInfo = document.getElementById('updateInfo');
-            updateBtn.disabled = true;
-            updateBtn.textContent = '检查中...';
-            updateInfo.style.display = 'none';
-
-            try {
-                const response = await fetch(API_PREFIX + '/api/check-update');
-                const result = await response.json();
-
-                if (!result.success) {
-                    updateInfo.style.display = 'block';
-                    updateInfo.style.color = '#ff4d4f';
-                    updateInfo.textContent = '检查失败: ' + result.message;
-                    return;
-                }
-
-                updateInfo.style.display = 'block';
-                if (result.hasUpdate) {
-                    versionEl.textContent = `v${result.currentVersion}`;
-                    updateInfo.style.color = '#fa8c16';
-                    updateInfo.innerHTML = `发现新版本 <strong>v${result.latestVersion}</strong>！请在宿主机执行 <code style="background:var(--ui-surface-soft);padding:2px 6px;border-radius:3px;">docker compose pull && docker compose up -d</code> 更新`;
-                } else {
-                    updateInfo.style.color = '#52c41a';
-                    updateInfo.textContent = '✔ 当前已是最新版本';
-                }
-            } catch (error) {
-                updateInfo.style.display = 'block';
-                updateInfo.style.color = '#ff4d4f';
-                updateInfo.textContent = '检查失败: ' + error.message;
-            } finally {
-                updateBtn.disabled = false;
-                updateBtn.textContent = '检查更新';
-            }
-        }
-
         // 重启服务
         /**
          * @param {boolean} skipConfirm  已经确认过，跳过二次确认
@@ -11165,13 +11032,11 @@ if(success){
         let groupSelectMode = false;           // 左栏分组多选：勾几个分组一次隐藏，与组内频道的批量管理互不相干
         const selectedGroupNames = new Set();  // 勾选的分组按显示名记：保存后重新加载，下标会变
         const SYSTEM_ANNOUNCEMENT_ID = 'iptv-announcement';
-        // 系统频道：公告 + 央视频登录教程 + 「网络分享」添加教程，都在「公告」分组、可逐条隐藏、不能删/移/改名/改序。
-        // 与服务端 utils/announcement.js 的 SYSTEM_CHANNELS 对应。
-        const SYSTEM_CHANNEL_IDS = new Set([SYSTEM_ANNOUNCEMENT_ID, 'iptv-ysp-login-guide', 'iptv-from-the-web-guide']);
+        // 系统频道：公告 + 登录教程，都在「公告」分组、可逐条隐藏、不能删/移/改名/改序。
+        const SYSTEM_CHANNEL_IDS = new Set([SYSTEM_ANNOUNCEMENT_ID, 'iptv-ysp-login-guide']);
         const SYSTEM_CHANNEL_NOTES = {
-            'iptv-announcement': '项目自带的使用说明与版权提示短片',
-            'iptv-ysp-login-guide': '演示如何从浏览器复制 Cookie 把央视频登录态导入 iPTV 的教程短片，给 Docker / NAS 用户看的',
-            'iptv-from-the-web-guide': '演示如何把仓库 from-the-web.m3u 里的网络第三方源作为订阅添加到 iPTV 的教程短片，给想自己加回这些频道的用户看的',
+            'iptv-announcement': '使用说明与版权提示短片',
+            'iptv-ysp-login-guide': '演示如何从浏览器复制 Cookie 把登录态导入播放列表的教程短片',
         };
 
         function isSystemAnnouncementChannel(channel) {
