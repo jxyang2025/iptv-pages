@@ -18,6 +18,12 @@ binding = "IPTV_KV"
 id = "1c84e7b651284d499e5fc36d81f747b7"
 preview_id = "304707adff8b4fcca2af5e324ec49b22"
 
+# 定时刷新：Cron 每小时检查一次；是否真正拉取由 auto-refresh KV 配置决定（默认 24 小时）。
+# Cron 时间一律为 UTC，"0 * * * *" = 每小时整点（北京时间每小时整点）。
+# 改这里只会改「检查频率」；改实际拉取间隔请用 /api/auto-refresh（见 README）。
+[triggers]
+crons = ["0 * * * *"]
+
 # ADMIN_PASS：管理页访问密码（可选）。设置后需在请求头带 X-Admin-Pass 才能写操作。
 # 在 Cloudflare 控制台 Settings → Environment variables 添加；本地放 .dev.vars。
 # 注意：此版本为纯 KV 存储，无需 BACKEND_ORIGIN / BACKEND_PASS / BACKEND_PREFIX。

@@ -10,9 +10,12 @@
 管理端 ──HTTPS──> Cloudflare Worker (src/index.js)
                     ├─ /admin.html /player.html /图标 /播放器库  →  ASSETS 静态资源
                     ├─ /api/*                                   →  Worker 内置 API
-                    │     └─ 订阅源 CRUD / 导入订阅 / 配置读写    →  KV 读写
+                    │     ├─ 订阅源 CRUD / 导入订阅 / 配置读写    →  KV 读写
+                    │     └─ /api/auto-refresh                  →  查看/改频率/立即刷新
                     ├─ /m3u  /interface.m3u  /txt                →  从 KV 输出播放列表
                     └─ /playback.xml                            →  空 EPG 占位
+
+Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建频道/M3U → KV
 ```
 
 对比旧方案（反代到 Docker + Tunnel）：本方案**没有源站、不开端口、不用 Tunnel、不用常驻进程**，全部跑在 Cloudflare 免费额度内。
@@ -22,6 +25,7 @@
 | 能力 | 状态 | 说明 |
 |---|---|---|
 | 添加/编辑/删除订阅源 | ✅ | 在线 URL 抓取 + 本地粘贴/文件导入 |
+| 定时自动刷新订阅 | ✅ | Cloudflare Cron 每整点检查，默认每 24 小时拉取一次并重建列表；频率可调 |
 | M3U / TXT(diyp) 解析 | ✅ | 复刻上游解析逻辑（group-title / tvg-id / logo / EXTVLCOPT / 回看） |
 | 生成播放列表 `/m3u` | ✅ | 保存/导入后自动重建 |
 | 系统配置保存 | ✅ | 存 KV |
@@ -45,7 +49,7 @@
 ├── scripts/
 │   ├── sync-web.mjs              # 一键同步上游前端
 │   └── legacy-config/            # 旧版 _redirects/_headers 存档（Workers 模式不用）
-├── wrangler.toml                 # Workers + Assets + KV 绑定配置
+├── wrangler.toml                 # Workers + Assets + KV + Cron 绑定配置
 ├── .dev.vars.example             # 可选管理员口令模板
 ├── LICENSE                       # 上游 GPL-3.0 许可证
 └── README.md                     # 本文档
@@ -61,6 +65,8 @@
 | `built-in` | 内置源配置 |
 | `playlist-config` | 我的频道配置（隐藏/分组/改名等） |
 | `playlist-m3u` | 生成的 M3U 纯文本 |
+| `auto-refresh` | 定时刷新配置 `{enabled,intervalHours,lastRunAt,lastResult}` |
+| `auto-refresh-lock` | 定时任务防重入锁（带 TTL，自动过期） |
 
 ## 部署步骤
 
@@ -103,6 +109,48 @@ npx wrangler deploy           # 真正上线
 3. 点**导入并保存**：Worker 抓取订阅、解析频道、写入 KV、自动生成播放列表。
 4. 顶部订阅地址栏即为播放列表地址（`/m3u`），复制到播放器即可。
 
+## 定时自动刷新
+
+Worker 注册了 Cloudflare Cron Trigger，**每小时整点（UTC，也就是北京时间每小时整点）**执行一次检查；真正拉取订阅的间隔由 KV 配置控制，默认 **24 小时**。因此不需要本地电脑、Docker 或 WorkBuddy 定时 task 常开。
+
+工作机制：
+
+1. 到点后读取 `auto-refresh` 配置；未到 `intervalHours` 则直接跳过，不消耗订阅请求。
+2. 到点则遍历 `ext-config.sources` 中所有「订阅模式 + 有订阅地址 + 未禁用 + 非本地粘贴」的源，逐条重新抓取、解析、更新 `parsedChannels`。
+3. 单条源失败只写 `fetchStatus`，**保留上一次成功的频道**，不会把播放列表清空。
+4. 全部处理完统一重建 `channels` 与 `playlist-m3u`，并写入 `lastRunAt` / `lastResult`。
+5. KV 锁 `auto-refresh-lock` 防止上一轮没跑完时重复执行。
+
+前端管理页没有加新按钮，直接用 API 查看/改频率（若设置了 `ADMIN_PASS`，额外加 `-H 'X-Admin-Pass: <口令>'`）：
+
+```bash
+BASE=https://iptv-pages.jxy5460.workers.dev
+
+# 查看当前配置与上次运行结果
+curl "$BASE/api/auto-refresh"
+
+# 改成每 6 小时刷新一次（intervalHours 可取 1~720）
+curl -X POST "$BASE/api/auto-refresh" \
+  -H 'Content-Type: application/json' \
+  -d '{"intervalHours":6}'
+
+# 关闭 / 重新开启自动刷新
+curl -X POST "$BASE/api/auto-refresh" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":false}'
+
+curl -X POST "$BASE/api/auto-refresh" \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true}'
+
+# 不等定时，立即强制刷新一次
+curl -X POST "$BASE/api/auto-refresh" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"run"}'
+```
+
+> 改 `wrangler.toml` 里的 `crons` 只能改「检查频率」；改「实际拉取间隔」请用上面的 `/api/auto-refresh`。
+
 ## 可选：管理页口令
 
 默认任何人可访问管理页并修改配置。如需口令：
@@ -117,7 +165,7 @@ npx wrangler deploy           # 真正上线
 2. **KV 最终一致性**：保存/导入后立即回读可能拿到稍旧的值（通常同区域秒级）。前端主要依赖本地内存状态，一般无感。
 3. **抓取超时**：Worker 单次请求有 CPU/时间限制，`fetchTimeout` 建议 ≤ 25 秒；超大订阅（上万频道）可能超限。
 4. **EPG**：`/playback.xml` 返回空结构，播放器无节目单。
-5. **无定时刷新**：Worker 无常驻定时器，订阅不会自动更新——需要时到管理页点「导入并保存」手动刷新，或后续接入 Cloudflare Cron Trigger。
+5. **定时刷新频率**：免费版每个账号最多 5 个 Cron Trigger，本项目只用 1 个；单次 Cron 的 CPU 上限为 10 ms，若订阅源超大（上万频道）可能超限，建议拆分成多个源或调大刷新间隔。刷新失败不会清空已有频道。
 
 ## 升级前端
 

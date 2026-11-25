@@ -11,6 +11,8 @@
  *   built-in        内置源配置
  *   playlist-config 我的频道配置
  *   playlist-m3u    生成的 M3U 文本
+ *   auto-refresh    定时刷新配置与上次执行结果
+ *   auto-refresh-lock 定时任务防重入锁（带 TTL，自动过期）
  *   其余小配置各占一键（aliases/group-rules/epg/notify/users/extractors/...）
  */
 
@@ -96,6 +98,16 @@ const DEFAULT_PLAYLIST_CFG = () => ({
   keepRuleSources: [], disabledSources: [],
 });
 const DEFAULT_EXTRACTORS = { enabled: true, modules: [], contentFlags: {} };
+
+// 定时刷新：Cron 每小时检查一次，真正拉取的间隔由 KV 配置控制（默认 24 小时）
+const DEFAULT_AUTO_REFRESH = () => ({
+  enabled: true,
+  intervalHours: 24,
+  lastRunAt: 0,
+  lastResult: null,
+});
+const AUTO_REFRESH_LOCK_KEY = 'auto-refresh-lock';
+const AUTO_REFRESH_LOCK_TTL = 600; // 秒：防止上一次刷新未结束时重复执行
 
 // ---------- M3U / TXT 解析（复刻上游 externalSources.js）----------
 function extractExtinfName(line) {
@@ -302,6 +314,105 @@ async function persistAndRebuild(env, extConfig) {
   await env.IPTV_KV.put('playlist-m3u', buildM3u(extConfig, channels, sys));
 }
 
+// ---------- 定时自动刷新订阅 ----------
+function normalizeAutoRefresh(raw) {
+  const d = DEFAULT_AUTO_REFRESH();
+  if (!raw || typeof raw !== 'object') return d;
+  const hours = Number(raw.intervalHours);
+  return {
+    enabled: raw.enabled !== false,
+    intervalHours: Number.isFinite(hours) ? Math.min(720, Math.max(1, hours)) : d.intervalHours,
+    lastRunAt: Number(raw.lastRunAt) || 0,
+    lastResult: raw.lastResult && typeof raw.lastResult === 'object' ? raw.lastResult : null,
+  };
+}
+
+// 拉起所有「订阅模式 + 有 URL + 未禁用 + 非本地粘贴」的外部源，逐条更新 parsedChannels。
+// 单条失败只记录状态，保留上一次成功解析的频道，避免订阅抖动导致播放列表被清空。
+async function runAutoRefresh(env, { force = false, cron = '' } = {}) {
+  const now = Date.now();
+  const cfg = normalizeAutoRefresh(await kvGet(env, 'auto-refresh', null));
+
+  if (!cfg.enabled && !force) {
+    return { status: 'disabled', message: '自动刷新已关闭' };
+  }
+  if (!force && cfg.lastRunAt && now - cfg.lastRunAt < cfg.intervalHours * 3600 * 1000) {
+    return {
+      status: 'skipped',
+      message: `未到刷新间隔（${cfg.intervalHours} 小时）`,
+      lastRunAt: cfg.lastRunAt,
+      nextRunAt: cfg.lastRunAt + cfg.intervalHours * 3600 * 1000,
+    };
+  }
+
+  // KV TTL 锁：防止上一次刷新还没跑完时重复执行
+  let locked = false;
+  try {
+    const lock = await env.IPTV_KV.get(AUTO_REFRESH_LOCK_KEY, 'text');
+    if (lock && now - Number(lock) < AUTO_REFRESH_LOCK_TTL * 1000) {
+      return { status: 'skipped', message: '上一次自动刷新仍在执行' };
+    }
+    await env.IPTV_KV.put(AUTO_REFRESH_LOCK_KEY, String(now), { expirationTtl: AUTO_REFRESH_LOCK_TTL });
+    locked = true;
+  } catch { /* 锁失败不阻断刷新 */ }
+
+  try {
+    const ext = await kvGet(env, 'ext-config', DEFAULT_EXT());
+    if (!Array.isArray(ext.sources)) ext.sources = [];
+    if (!ext.fetchStatus || typeof ext.fetchStatus !== 'object') ext.fetchStatus = {};
+
+    const targets = ext.sources
+      .map((s, idx) => ({ s, idx }))
+      .filter(({ s }) => s && s.enabled !== false && s.mode === 'subscription'
+        && (s.subscriptionUrl || s.m3u8Url) && !s.localImport);
+
+    let succeeded = 0;
+    let failed = 0;
+    let channelCount = 0;
+    for (const { s, idx } of targets) {
+      const sid = s.id || `idx_${idx}`;
+      try {
+        const { channels } = await fetchSubscription(s);
+        ext.sources[idx].parsedChannels = channels;
+        ext.sources[idx].lastUpdated = Date.now();
+        ext.fetchStatus[sid] = { success: true, channelCount: channels.length, at: Date.now() };
+        succeeded += 1;
+        channelCount += channels.length;
+      } catch (e) {
+        failed += 1;
+        ext.fetchStatus[sid] = {
+          success: false,
+          error: e && e.message ? e.message : String(e),
+          at: Date.now(),
+        };
+      }
+    }
+
+    await persistAndRebuild(env, ext);
+
+    cfg.lastRunAt = Date.now();
+    cfg.lastResult = {
+      at: cfg.lastRunAt,
+      cron: cron || 'manual',
+      total: targets.length,
+      succeeded,
+      failed,
+      channelCount,
+    };
+    await kvPut(env, 'auto-refresh', cfg);
+
+    return {
+      status: 'ok',
+      ...cfg.lastResult,
+      nextRunAt: cfg.lastRunAt + cfg.intervalHours * 3600 * 1000,
+    };
+  } finally {
+    if (locked) {
+      try { await env.IPTV_KV.delete(AUTO_REFRESH_LOCK_KEY); } catch { /* 锁会由 TTL 兜底清理 */ }
+    }
+  }
+}
+
 // ---------- 鉴权（可选管理员口令）----------
 function authorized(request, env) {
   const required = String(env.ADMIN_PASS || '');
@@ -367,6 +478,26 @@ async function handleApi(request, env, url, rel) {
     if (!authorized(request, env)) return fail('未授权', 403);
     return handleExternalSources(env, body);
   }
+
+  // 定时刷新：查看配置 / 修改频率 / 立即手动刷新一次
+  if (seg === 'auto-refresh' && method === 'GET') {
+    return ok(normalizeAutoRefresh(await kvGet(env, 'auto-refresh', null)));
+  }
+  if (seg === 'auto-refresh' && method === 'POST') {
+    if (!authorized(request, env)) return fail('未授权', 403);
+    if (body.action === 'run' || body.force === true) {
+      const result = await runAutoRefresh(env, { force: true, cron: 'manual' });
+      const message = result.status === 'ok'
+        ? `刷新完成：成功 ${result.succeeded} 个，失败 ${result.failed} 个，共 ${result.channelCount} 个频道`
+        : result.message;
+      return ok(result, { message });
+    }
+    const cur = normalizeAutoRefresh(await kvGet(env, 'auto-refresh', null));
+    const next = normalizeAutoRefresh({ ...cur, ...body });
+    await kvPut(env, 'auto-refresh', next);
+    return ok(next, { message: '自动刷新配置已保存' });
+  }
+
   if (seg === 'built-in-sources' && method === 'GET') {
     const v = await kvGet(env, 'built-in', { enabled: true, sources: [], builtInSubscriptionUrls: [] });
     return ok(v);
@@ -515,6 +646,21 @@ async function handlePlaylistOut(env, url, rel) {
 
 // ================= Worker 入口 =================
 export default {
+  // Cloudflare Cron Trigger：每小时触发一次，实际是否拉取由 auto-refresh KV 配置决定
+  async scheduled(controller, env) {
+    try {
+      const result = await runAutoRefresh(env, { cron: controller.cron || '' });
+      console.log('[auto-refresh]', JSON.stringify(result));
+      // 所有可预期结果都已妥善记录，无需 Cloudflare 重复执行
+      if (controller.noRetry) controller.noRetry();
+      return result;
+    } catch (e) {
+      console.error('[auto-refresh] failed:', e && e.message ? e.message : e);
+      try { if (controller.noRetry) controller.noRetry(); } catch { /* ignore */ }
+      return { status: 'error', message: e && e.message ? e.message : String(e) };
+    }
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
     const rel = url.pathname.replace(/^\/+/, '');
