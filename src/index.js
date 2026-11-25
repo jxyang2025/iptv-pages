@@ -32,11 +32,46 @@ const kvGet = async (env, key, fallback) => {
 };
 const kvPut = (env, key, val) => env.IPTV_KV.put(key, JSON.stringify(val));
 
+// 全局按播放 URL 去重（跨来源）：同一 url 只保留先入者，把后续来源并入 sourceIds。
+// 说明：上游原版是「组内 + 名字+地址」去重；本项目为多订阅源场景，按用户诉求改为
+// 「全局 + URL」去重——不同源的同一频道 url 常落在不同分组名，组内去重无法覆盖。
+// 同名不同地址的线路不合并（互为备份），仅 url 相同才算重复。
+// 合并 sourceIds 可让前端「N源」徽标与按档禁用逻辑保持正确。
+function dedupeByUrl(groups) {
+  const byUrl = new Map();
+  const out = [];
+  for (const g of (Array.isArray(groups) ? groups : [])) {
+    const list = Array.isArray(g.channels) ? g.channels
+      : (Array.isArray(g.dataList) ? g.dataList : []);
+    const kept = [];
+    for (const ch of list) {
+      const key = String((ch && ch.url) || '').trim();
+      if (!key) { kept.push(ch); continue; } // 无 url 的条目不去重
+      const prev = byUrl.get(key);
+      if (prev) {
+        // 同 url：把后来来源并入保留者的 sourceIds，然后丢弃重复条目
+        if (!Array.isArray(prev.sourceIds)) prev.sourceIds = [];
+        const add = []
+          .concat(prev.sourceId ? [prev.sourceId] : [])
+          .concat(Array.isArray(ch.sourceIds) ? ch.sourceIds : [])
+          .concat(ch.sourceId ? [ch.sourceId] : []);
+        for (const sid of add) if (sid && !prev.sourceIds.includes(sid)) prev.sourceIds.push(sid);
+        continue;
+      }
+      byUrl.set(key, ch);
+      kept.push(ch);
+    }
+    out.push({ ...g, channels: kept, dataList: kept });
+  }
+  return out;
+}
+
 // 前端有两套字段约定：/api/channels 用 dataList，/api/my-playlist 用 channels。
 // 同一份分组数据必须两个字段都带，且指向同一数组，否则 renderGroupLists() 里
 // group.channels.length 会对 undefined 取 length 抛 TypeError（表现为"加载我的频道失败"）。
+// 同时在此统一做 URL 去重，使读取旧数据也即时生效（无需用户重新导入订阅）。
 function normalizeGroups(groups) {
-  return (Array.isArray(groups) ? groups : []).map(g => {
+  return dedupeByUrl(groups).map(g => {
     const list = Array.isArray(g.channels) ? g.channels
       : (Array.isArray(g.dataList) ? g.dataList : []);
     return { ...g, channels: list, dataList: list };
@@ -230,6 +265,8 @@ function rebuildChannels(extConfig) {
   const sources = Array.isArray(extConfig.sources) ? extConfig.sources : [];
   for (const src of sources) {
     if (src.enabled === false) continue;
+    // 来源标识：前端 sourceNamesFor 映射 ext:<id> → 源名（徽标显示）；去重时并入 sourceIds
+    const sourceId = src.id ? `ext:${src.id}` : '';
     if (src.mode === 'subscription' && Array.isArray(src.parsedChannels)) {
       for (const ch of src.parsedChannels) {
         const gname = src.ignoreGroups ? '未分组' : (ch.group && ch.group !== '未分组' ? ch.group : (src.group || '未分组'));
@@ -237,6 +274,7 @@ function rebuildChannels(extConfig) {
         groups.get(gname).push({
           id: ch.id || stableId(ch.name, ch.url),
           name: ch.name, url: ch.url, group: gname,
+          ...(sourceId ? { sourceId } : {}),
           ...(ch.logo ? { logo: ch.logo } : {}),
           ...(ch.opts ? { opts: ch.opts } : {}),
         });
@@ -247,6 +285,7 @@ function rebuildChannels(extConfig) {
       groups.get(gname).push({
         id: src.id || stableId(src.name, src.m3u8Url),
         name: src.name || '未命名', url: src.m3u8Url, group: gname,
+        ...(sourceId ? { sourceId } : {}),
       });
     }
   }
