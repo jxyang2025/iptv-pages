@@ -71,6 +71,20 @@ const BUILTIN_GROUP_CANON = {
   地方: '地方',
 };
 
+// 已知省市地区名：用于判断「浙江卫视」「江苏IPTV」里的前缀是否为地区。
+// 作用：只在这些地区名下才剥离「卫视/IPTV」等后缀，避免把「凤凰卫视」这类品牌误剥成「凤凰」。
+const KNOWN_REGIONS = new Set([
+  '北京','上海','天津','重庆','河北','山西','辽宁','吉林','黑龙江','江苏','浙江','安徽',
+  '福建','江西','山东','河南','湖北','湖南','广东','海南','四川','贵州','云南','陕西',
+  '甘肃','青海','台湾','内蒙古','广西','西藏','宁夏','新疆','香港','澳门',
+  '深圳','广州','杭州','南京','成都','武汉','西安','苏州','青岛','大连','宁波','厦门',
+  '长沙','郑州','济南','福州','合肥','南昌','昆明','贵阳','南宁','海口','太原','石家庄',
+  '哈尔滨','长春','沈阳','兰州','西宁','银川','乌鲁木齐','拉萨','呼和浩特',
+]);
+
+// 条件后缀：仅当剥离后的核心名是已知地区时才应用，防止误伤品牌名。
+const CONDITIONAL_SUFFIXES = ['卫视', 'iptv', '网络', '专区'];
+
 // 内置精确别名：整串匹配（小写），优先于签名归一化。
 // 「央视频」若按词尾剥离「视频」会变成「央」，故必须精确拦截这类写法。
 const BUILTIN_GROUP_ALIASES = {
@@ -83,11 +97,42 @@ const BUILTIN_GROUP_ALIASES = {
   cctv网: '央视',
 };
 
-// 组名签名：小写、去掉 emoji/符号/空白（只留字母数字汉字）、循环剥离尾部修饰词。
-// 订阅源组名常带 📺 💰 等 emoji 前缀，必须先剔除才能与标准组名匹配。
+// 组名核心提取：去掉 emoji/符号前缀、循环剥离尾部修饰词，但保留原文的大小写与汉字。
+// 用于生成"通用归一显示名"：☘️北京频道 / 北京频道 / 北京 → 北京，所有省份、地区、主题组通用。
+// 与 groupNameSignature 的区别：后者全小写，仅用于查表；本函数产出实际显示给用户的组名。
+function groupNameCore(name) {
+  let s = String(name == null ? '' : name).trim().replace(/^[^\p{L}\p{N}]+/u, '');
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ < 8) {
+    changed = false;
+    for (const suf of GROUP_NAME_SUFFIXES) {
+      // 中文修饰词直接匹配；英文修饰词（hd/4k/vip…）大小写不敏感
+      const hit = s.endsWith(suf) || s.toLowerCase().endsWith(suf.toLowerCase());
+      if (hit && s.length > suf.length) {
+        s = s.slice(0, -suf.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  // 条件后缀（卫视/IPTV/网络/专区）：仅当剥离后核心名是已知省市地区时才应用，
+  // 这样「浙江卫视」→「浙江」，而「凤凰卫视」保持原样不被误剥。
+  for (const suf of CONDITIONAL_SUFFIXES) {
+    if (s.length > suf.length && s.toLowerCase().endsWith(suf.toLowerCase())) {
+      const candidate = s.slice(0, -suf.length).trim();
+      if (KNOWN_REGIONS.has(candidate)) { s = candidate; break; }
+    }
+  }
+  return s.trim();
+}
+
+// 组名签名：小写、去掉所有 emoji/符号/空白（只留字母数字汉字）、循环剥离尾部修饰词。
+// 用于查表与比较键，比 groupNameCore 更激进（连内部符号也去掉），例如 CCTV-5 → cctv5。
 function groupNameSignature(name) {
-  let s = String(name == null ? '' : name).trim().toLowerCase()
-    .replace(/[^\p{L}\p{N}]/gu, '');
+  const core = groupNameCore(name).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  // 去掉内部符号后可能重新暴露尾部修饰词，再剥一次
+  let s = core;
   let changed = true;
   let guard = 0;
   while (changed && guard++ < 8) {
@@ -146,7 +191,11 @@ function canonicalGroupName(name, aliases = null) {
   if (Object.prototype.hasOwnProperty.call(BUILTIN_GROUP_CANON, sig)) {
     return BUILTIN_GROUP_CANON[sig];
   }
-  return raw;
+  // 通用归一（举一反三）：未命中任何表时，剥离 emoji 前缀与尾部修饰词，用核心名作统一组名。
+  // 例：☘️北京频道 / 北京频道 / 北京 → 北京；🌸上海高清 / 上海频道 → 上海。
+  // 只有核心名非空时才发现作用；纯 emoji / 纯修饰词的组名保持原样，避免误合并。
+  const core = groupNameCore(raw);
+  return core || raw;
 }
 
 // 全局按播放 URL 去重（跨来源）：同一 url 只保留先入者，把后续来源并入 sourceIds。
