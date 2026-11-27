@@ -27,7 +27,9 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | 添加/编辑/删除订阅源 | ✅ | 在线 URL 抓取 + 本地粘贴/文件导入 |
 | 定时自动刷新订阅 | ✅ | Cloudflare Cron 每整点检查，默认每 24 小时拉取一次并重建列表；频率可调 |
 | M3U / TXT(diyp) 解析 | ✅ | 复刻上游解析逻辑（group-title / tvg-id / logo / EXTVLCOPT / 回看） |
-| 生成播放列表 `/m3u` | ✅ | 保存/导入后自动重建 |
+| 关键字自动分组 | ✅ | 按频道名关键字把「未分组」频道归类；首条命中胜、刷新不丢、存 KV |
+| 全局 URL 去重 | ✅ | 不同订阅源里相同播放 URL 只保留一条，并合并来源徽标 |
+| 生成播放列表 `/m3u` | ✅ | 保存/导入/改分组规则后自动重建 |
 | 系统配置保存 | ✅ | 存 KV |
 | 我的频道（隐藏/分组/改名） | ✅ | 存 KV |
 | EPG / 台标托管 / 用户令牌 / 直播抓取模块 | ⚠️ 占位 | 返回空结构，页面可用但不产生数据（Workers 无原生进程/浏览器） |
@@ -67,6 +69,7 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | `playlist-m3u` | 生成的 M3U 纯文本 |
 | `auto-refresh` | 定时刷新配置 `{enabled,intervalHours,lastRunAt,lastResult}` |
 | `auto-refresh-lock` | 定时任务防重入锁（带 TTL，自动过期） |
+| `group-keyword-rules` | 关键字自动分组规则 `[{group, keywords:[]}]` |
 
 ## 部署步骤
 
@@ -150,6 +153,26 @@ curl -X POST "$BASE/api/auto-refresh" \
 ```
 
 > 改 `wrangler.toml` 里的 `crons` 只能改「检查频率」；改「实际拉取间隔」请用上面的 `/api/auto-refresh`。
+
+## 关键字自动分组（怎么工作）
+
+管理页「设置 → 自动分组」里配的规则，保存在 KV 的 `group-keyword-rules`，格式 `[{group, keywords:[]}]`。生效时机与范围：
+
+- **只对「未分组」频道生效**。频道若已被订阅源自带分组（`group-title`）归好类，或由源的「默认分组」归类，规则不会动它；想让某源全部按规则重排，勾选该源的「忽略源自带分组」（未命中规则的进该源默认分组）。
+- **首条命中胜**：多条规则按列表从上到下匹配，频道名包含任一关键字（大小写不敏感、子串匹配）即归入该规则的目标组，后面的规则不再匹配。用规则行上的 ↑/↓ 调整优先级。
+- **保存即生效**：规则落库后会立刻从订阅原始数据重建 `channels` 与 `/m3u`，无需重新导入订阅；定时刷新（Cron）重建时也会套用最新规则，所以"刷新也不丢"。
+
+API（前端就是调这两个）：
+
+```bash
+BASE=https://iptv-pages.jxy5460.workers.dev
+curl "$BASE/api/group-keyword-rules"                                    # 查看规则
+curl -X POST "$BASE/api/group-keyword-rules" -H 'Content-Type: application/json' \
+  -d '{"action":"setRule","group":"央视","keywords":"CCTV,央视视频,央视频道"}'
+# action 还支持 moveRule（配 group + direction:up/down）、removeRule（配 group）
+```
+
+> ⚠️ 这是"按名字归类到目标组"，**不是把几个已有的组名合并成一个组**。若要把「央视一套」「CCTV」等多个已存在的组合并，需用管理页的分组重命名/移动，或让源忽略自带分组后重新用规则归类。
 
 ## 可选：管理页口令
 
