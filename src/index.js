@@ -251,6 +251,32 @@ function normalizeGroups(groups, aliases = null) {
   return dedupeByUrl([...merged.entries()].map(([name, dataList]) => ({ name, dataList })));
 }
 
+// 「我的频道」里上移/下移/置顶/置底保存的是 playlist-config.groupOrder，
+// 但订阅重建只写频道内容、不含顺序。读取出口必须重新应用，否则刷新就回到默认顺序。
+// 公告组按前端约定固定最前；groupOrder 里没有的组保持原有相对顺序、排在最后。
+function sortGroupsByConfig(groups, cfg) {
+  const order = Array.isArray(cfg?.groupOrder) ? cfg.groupOrder : [];
+  if (!order.length || !Array.isArray(groups)) return groups;
+  const pos = new Map();
+  for (let i = 0; i < order.length; i++) {
+    const name = String(order[i] ?? '');
+    if (name && !pos.has(name)) pos.set(name, i);
+  }
+  const systemIds = new Set(['iptv-announcement', 'iptv-ysp-login-guide']);
+  const isAnnouncement = (g) => g?.name === '公告'
+    && (Array.isArray(g.channels) ? g.channels : (g.dataList || []))
+      .some(ch => ch && (systemIds.has(ch.id) || systemIds.has(ch.tvgId)));
+  const fixed = groups.filter(isAnnouncement);
+  const rest = groups.filter(g => !isAnnouncement(g));
+  // sort 在 ES2019+ 是稳定排序，未在 groupOrder 中登记的组保持原相对顺序
+  rest.sort((a, b) => {
+    const pa = pos.has(a.name) ? pos.get(a.name) : Number.MAX_SAFE_INTEGER;
+    const pb = pos.has(b.name) ? pos.get(b.name) : Number.MAX_SAFE_INTEGER;
+    return pa - pb;
+  });
+  return [...fixed, ...rest];
+}
+
 // ---------- 默认配置 ----------
 const DEFAULT_SYS = {
   port: 0, host: '', pass: '', adminPath: 'admin',
@@ -684,8 +710,10 @@ async function handleApi(request, env, url, rel) {
 
   // 硬门槛 GET（页面初始化必须 200）
   if (seg === 'channels' && method === 'GET') {
-    const aliases = await loadGroupAliases(env);
-    return json(normalizeGroups(await kvGet(env, 'channels', []), aliases)); // 裸数组，双字段兼容
+    const [aliases, cfg, raw] = await Promise.all([
+      loadGroupAliases(env), kvGet(env, 'playlist-config', DEFAULT_PLAYLIST_CFG()), kvGet(env, 'channels', []),
+    ]);
+    return json(sortGroupsByConfig(normalizeGroups(raw, aliases), cfg)); // 裸数组，双字段兼容
   }
   if (seg === 'system-config' && method === 'GET') {
     return json(await kvGet(env, 'sys-config', DEFAULT_SYS)); // 裸对象
@@ -739,8 +767,10 @@ async function handleApi(request, env, url, rel) {
     return ok(body, { message: '已保存' });
   }
   if (seg === 'my-playlist' && method === 'GET') {
-    const aliases = await loadGroupAliases(env);
-    const channels = normalizeGroups(await kvGet(env, 'channels', []), aliases);
+    const [aliases, cfg, raw] = await Promise.all([
+      loadGroupAliases(env), kvGet(env, 'playlist-config', DEFAULT_PLAYLIST_CFG()), kvGet(env, 'channels', []),
+    ]);
+    const channels = sortGroupsByConfig(normalizeGroups(raw, aliases), cfg);
     return ok(channels, { originalData: channels, hiddenCustomGroups: [] });
   }
   if (seg === 'my-playlist-profiles' && method === 'GET') return ok([{ id: 'default', name: '默认' }]);
