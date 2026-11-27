@@ -14,6 +14,7 @@
  *   auto-refresh    定时刷新配置与上次执行结果
  *   auto-refresh-lock 定时任务防重入锁（带 TTL，自动过期）
  *   group-keyword-rules 关键字自动分组规则 [{group, keywords:[]}]，顺序即优先级
+ *   group-alias      组名归一化别名 [{from,to}]，智能合并同义组名之外的手动补充
  *   其余小配置各占一键（aliases/epg/notify/users/extractors/...）
  */
 
@@ -34,6 +35,119 @@ const kvGet = async (env, key, fallback) => {
   } catch { return fallback; }
 };
 const kvPut = (env, key, val) => env.IPTV_KV.put(key, JSON.stringify(val));
+
+// ---------- 组名智能归一化（合并同义组名）----------
+// 场景：不同订阅源对同一类频道用了不同组名（央视频 / 央视 / CCTV），
+// 目标：智能识别为同一组，前端只显示一个组名，不再显示三组。
+// 做法：组名先算「签名」（小写、去空白/分隔符、循环剥离尾部通用修饰词），
+// 再用「内置同义词表 + 用户自定义别名」映射到统一显示名。
+const GROUP_ALIAS_KEY = 'group-alias';
+
+// 尾部通用修饰词：不区分组，剥离后得到组名签名。长的在前；循环可处理叠加（如「央视高清频道」）。
+const GROUP_NAME_SUFFIXES = [
+  '高清', '超清', '蓝光', 'uhd', '4k', 'hd', 'vip',
+  '付费', '精选', '频道', '视频', '网', '台',
+];
+
+// 内置同义词表：key 是签名，value 是统一显示名。
+// 央视三写法：央视频→签名「央视」、央视→「央视」、CCTV→「cctv」，两者均映射到「央视」。
+const BUILTIN_GROUP_CANON = {
+  cctv: '央视',
+  央视: '央视',
+  中央电视: '央视', // 中央电视台 → 去「台」→ 中央电视
+  央视国际: '央视',
+  卫视: '卫视',
+  电影: '电影',
+  电视剧: '电视剧',
+  体育: '体育',
+  新闻: '新闻',
+  少儿: '少儿',
+  儿童: '少儿',
+  纪录: '纪录片',
+  纪录片: '纪录片',
+  港澳: '港澳台',
+  港台: '港澳台',
+  港澳台: '港澳台',
+  地方: '地方',
+};
+
+// 内置精确别名：整串匹配（小写），优先于签名归一化。
+// 「央视频」若按词尾剥离「视频」会变成「央」，故必须精确拦截这类写法。
+const BUILTIN_GROUP_ALIASES = {
+  央视频: '央视',
+  cctv: '央视',
+  cctv视频: '央视',
+  中央电视台: '央视',
+  中央台: '央视',
+  央视网: '央视',
+  cctv网: '央视',
+};
+
+// 组名签名：小写、去掉 emoji/符号/空白（只留字母数字汉字）、循环剥离尾部修饰词。
+// 订阅源组名常带 📺 💰 等 emoji 前缀，必须先剔除才能与标准组名匹配。
+function groupNameSignature(name) {
+  let s = String(name == null ? '' : name).trim().toLowerCase()
+    .replace(/[^\p{L}\p{N}]/gu, '');
+  let changed = true;
+  let guard = 0;
+  while (changed && guard++ < 8) {
+    changed = false;
+    for (const suf of GROUP_NAME_SUFFIXES) {
+      if (s.length > suf.length && s.endsWith(suf)) {
+        s = s.slice(0, -suf.length);
+        changed = true;
+        break;
+      }
+    }
+  }
+  return s;
+}
+
+// 读取用户自定义别名。KV 存 [{from,to}]，返回 { exact:{原名小写→目标}, sig:{签名→目标} }。
+// exact 优先，避免「央视频」的自定义别名误伤「央视」（二者签名相同）。
+async function loadGroupAliases(env) {
+  const raw = await kvGet(env, GROUP_ALIAS_KEY, []);
+  const exact = {};
+  const sig = {};
+  if (!Array.isArray(raw)) return { exact, sig };
+  for (const r of raw) {
+    const from = String(r?.from || '').trim();
+    const to = String(r?.to || '').trim();
+    if (!from || !to) continue;
+    exact[from.toLowerCase()] = to;
+    const s = groupNameSignature(from);
+    if (s) sig[s] = to;
+  }
+  return { exact, sig };
+}
+
+// 把任意组名归一化为统一显示名；未命中任何规则时保持原名（保守，避免误合并）。
+function canonicalGroupName(name, aliases = null) {
+  const raw = String(name == null ? '' : name).trim();
+  if (!raw) return '未分组';
+  if (raw === '未分组') return raw;
+  const lower = raw.toLowerCase();
+  const cleaned = lower.replace(/[^\p{L}\p{N}]/gu, ''); // 去 emoji/符号后再查内置精确表
+  if (aliases && aliases.exact && Object.prototype.hasOwnProperty.call(aliases.exact, lower)) {
+    return aliases.exact[lower];
+  }
+  if (aliases && aliases.exact && cleaned !== lower
+      && Object.prototype.hasOwnProperty.call(aliases.exact, cleaned)) {
+    return aliases.exact[cleaned];
+  }
+  if (Object.prototype.hasOwnProperty.call(BUILTIN_GROUP_ALIASES, cleaned)) {
+    return BUILTIN_GROUP_ALIASES[cleaned];
+  }
+  const sig = groupNameSignature(raw);
+  if (!sig) return raw;
+  if (aliases && aliases.sig && Object.prototype.hasOwnProperty.call(aliases.sig, sig)) {
+    return aliases.sig[sig];
+  }
+  if (Object.prototype.hasOwnProperty.call(BUILTIN_GROUP_CANON, sig)) {
+    return BUILTIN_GROUP_CANON[sig];
+  }
+  return raw;
+}
 
 // 全局按播放 URL 去重（跨来源）：同一 url 只保留先入者，把后续来源并入 sourceIds。
 // 说明：上游原版是「组内 + 名字+地址」去重；本项目为多订阅源场景，按用户诉求改为
@@ -73,12 +187,19 @@ function dedupeByUrl(groups) {
 // 同一份分组数据必须两个字段都带，且指向同一数组，否则 renderGroupLists() 里
 // group.channels.length 会对 undefined 取 length 抛 TypeError（表现为"加载我的频道失败"）。
 // 同时在此统一做 URL 去重，使读取旧数据也即时生效（无需用户重新导入订阅）。
-function normalizeGroups(groups) {
-  return dedupeByUrl(groups).map(g => {
+function normalizeGroups(groups, aliases = null) {
+  // 先按归一化组名合并：不同源的「央视频 / 央视 / CCTV」归到同一个组名。
+  const merged = new Map();
+  for (const g of (Array.isArray(groups) ? groups : [])) {
     const list = Array.isArray(g.channels) ? g.channels
       : (Array.isArray(g.dataList) ? g.dataList : []);
-    return { ...g, channels: list, dataList: list };
-  });
+    const name = canonicalGroupName(g.name, aliases);
+    if (!merged.has(name)) merged.set(name, []);
+    const bucket = merged.get(name);
+    for (const ch of list) bucket.push(ch && ch.group !== name ? { ...ch, group: name } : ch);
+  }
+  // 再做 URL 全局去重；dedupeByUrl 返回的分组已同时带 channels/dataList 双字段。
+  return dedupeByUrl([...merged.entries()].map(([name, dataList]) => ({ name, dataList })));
 }
 
 // ---------- 默认配置 ----------
@@ -308,8 +429,8 @@ function matchGroupByRules(name, rules) {
   return null;
 }
 
-// 从外部源配置重建频道分组数组；rules 为已规整的关键字分组规则
-function rebuildChannels(extConfig, rules = []) {
+// 从外部源配置重建频道分组数组；rules 为关键字规则，aliases 为组名归一化别名
+function rebuildChannels(extConfig, rules = [], aliases = null) {
   const groups = new Map();
   const sources = Array.isArray(extConfig.sources) ? extConfig.sources : [];
   for (const src of sources) {
@@ -331,6 +452,8 @@ function rebuildChannels(extConfig, rules = []) {
             if (matched) gname = matched;
           }
         }
+        // 组名智能归一化：同义组名（央视频/央视/CCTV）合并到统一组名
+        gname = canonicalGroupName(gname, aliases);
         if (!groups.has(gname)) groups.set(gname, []);
         groups.get(gname).push({
           id: ch.id || stableId(ch.name, ch.url),
@@ -346,6 +469,7 @@ function rebuildChannels(extConfig, rules = []) {
         const matched = matchGroupByRules(src.name, rules);
         if (matched) gname = matched;
       }
+      gname = canonicalGroupName(gname, aliases);
       if (!groups.has(gname)) groups.set(gname, []);
       groups.get(gname).push({
         id: src.id || stableId(src.name, src.m3u8Url),
@@ -360,8 +484,8 @@ function rebuildChannels(extConfig, rules = []) {
 // 保存配置后同步重建频道 + M3U（自动应用最新关键字分组规则）
 async function persistAndRebuild(env, extConfig) {
   await kvPut(env, 'ext-config', extConfig);
-  const rules = await loadGroupRules(env);
-  const channels = rebuildChannels(extConfig, rules);
+  const [rules, aliases] = await Promise.all([loadGroupRules(env), loadGroupAliases(env)]);
+  const channels = rebuildChannels(extConfig, rules, aliases);
   await kvPut(env, 'channels', channels);
   const sys = await kvGet(env, 'sys-config', DEFAULT_SYS);
   // M3U 是纯文本，直接存 raw（不要走 kvPut 的 JSON.stringify，否则读出来带引号）
@@ -511,7 +635,8 @@ async function handleApi(request, env, url, rel) {
 
   // 硬门槛 GET（页面初始化必须 200）
   if (seg === 'channels' && method === 'GET') {
-    return json(normalizeGroups(await kvGet(env, 'channels', []))); // 裸数组，双字段兼容
+    const aliases = await loadGroupAliases(env);
+    return json(normalizeGroups(await kvGet(env, 'channels', []), aliases)); // 裸数组，双字段兼容
   }
   if (seg === 'system-config' && method === 'GET') {
     return json(await kvGet(env, 'sys-config', DEFAULT_SYS)); // 裸对象
@@ -565,7 +690,8 @@ async function handleApi(request, env, url, rel) {
     return ok(body, { message: '已保存' });
   }
   if (seg === 'my-playlist' && method === 'GET') {
-    const channels = normalizeGroups(await kvGet(env, 'channels', []));
+    const aliases = await loadGroupAliases(env);
+    const channels = normalizeGroups(await kvGet(env, 'channels', []), aliases);
     return ok(channels, { originalData: channels, hiddenCustomGroups: [] });
   }
   if (seg === 'my-playlist-profiles' && method === 'GET') return ok([{ id: 'default', name: '默认' }]);
@@ -597,6 +723,12 @@ async function handleApi(request, env, url, rel) {
     if (method === 'GET') return ok(await loadGroupRules(env));
     if (!authorized(request, env)) return fail('未授权', 403);
     return handleGroupRules(env, body);
+  }
+  // 组名别名：智能合并之外的手动补充映射（含 rebuild 仅重建不改动）
+  if (seg === 'group-alias') {
+    if (method === 'GET') return ok(await loadGroupAliasList(env));
+    if (!authorized(request, env)) return fail('未授权', 403);
+    return handleGroupAlias(env, body);
   }
   if (seg === 'extractors') return method === 'GET' ? ok(DEFAULT_EXTRACTORS) : ok(body.data || DEFAULT_EXTRACTORS, { message: '已保存' });
 
@@ -662,6 +794,49 @@ async function handleGroupRules(env, body) {
   const ext = await kvGet(env, 'ext-config', DEFAULT_EXT());
   await persistAndRebuild(env, ext);
   return ok(rules, { message: '已保存' });
+}
+
+// ---------- 组名别名：CRUD（智能合并的手动补充）----------
+async function loadGroupAliasList(env) {
+  const raw = await kvGet(env, GROUP_ALIAS_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(r => ({ from: String(r?.from || '').trim(), to: String(r?.to || '').trim() }))
+    .filter(r => r.from && r.to);
+}
+
+// 保存后重建频道与 M3U（含 action:'rebuild' 只重建不改动，供部署后刷新持久化数据）
+async function handleGroupAlias(env, body) {
+  const action = body.action || 'set';
+  const list = await loadGroupAliasList(env);
+
+  if (action === 'set') {
+    const from = String(body.from || '').trim();
+    const to = String(body.to || '').trim();
+    if (!from) return fail('请填写原组名');
+    if (!to) return fail('请填写合并后的组名');
+    if (from === '未分组') return fail('不能合并「未分组」');
+    const lower = from.toLowerCase();
+    const idx = list.findIndex(r => r.from.toLowerCase() === lower);
+    if (idx >= 0) list[idx] = { from, to }; else list.push({ from, to });
+  } else if (action === 'remove') {
+    const lower = String(body.from || '').trim().toLowerCase();
+    const next = list.filter(r => r.from.toLowerCase() !== lower);
+    if (next.length === list.length) return fail('别名不存在');
+    list.length = 0;
+    list.push(...next);
+  } else if (action === 'clear') {
+    list.length = 0;
+  } else if (action === 'rebuild') {
+    // 不改动别名，仅触发重建（部署后同步持久化的 channels / M3U）
+  } else {
+    return fail(`未知操作: ${action}`);
+  }
+
+  await kvPut(env, GROUP_ALIAS_KEY, list);
+  const ext = await kvGet(env, 'ext-config', DEFAULT_EXT());
+  await persistAndRebuild(env, ext);
+  return ok(list, { message: action === 'rebuild' ? '已重建' : '已保存' });
 }
 
 // ---------- 外部源：保存 + 导入订阅 ----------

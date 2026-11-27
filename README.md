@@ -28,6 +28,7 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | 定时自动刷新订阅 | ✅ | Cloudflare Cron 每整点检查，默认每 24 小时拉取一次并重建列表；频率可调 |
 | M3U / TXT(diyp) 解析 | ✅ | 复刻上游解析逻辑（group-title / tvg-id / logo / EXTVLCOPT / 回看） |
 | 关键字自动分组 | ✅ | 按频道名关键字把「未分组」频道归类；首条命中胜、刷新不丢、存 KV |
+| 组名智能合并 | ✅ | 不同源的同义组名（央视频/央视/CCTV/📺央视频道…）自动归一为一个组，可自定义别名 |
 | 全局 URL 去重 | ✅ | 不同订阅源里相同播放 URL 只保留一条，并合并来源徽标 |
 | 生成播放列表 `/m3u` | ✅ | 保存/导入/改分组规则后自动重建 |
 | 系统配置保存 | ✅ | 存 KV |
@@ -70,6 +71,7 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | `auto-refresh` | 定时刷新配置 `{enabled,intervalHours,lastRunAt,lastResult}` |
 | `auto-refresh-lock` | 定时任务防重入锁（带 TTL，自动过期） |
 | `group-keyword-rules` | 关键字自动分组规则 `[{group, keywords:[]}]` |
+| `group-alias` | 组名合并别名 `[{from,to}]`（智能归一之外手动补充） |
 
 ## 部署步骤
 
@@ -172,7 +174,31 @@ curl -X POST "$BASE/api/group-keyword-rules" -H 'Content-Type: application/json'
 # action 还支持 moveRule（配 group + direction:up/down）、removeRule（配 group）
 ```
 
-> ⚠️ 这是"按名字归类到目标组"，**不是把几个已有的组名合并成一个组**。若要把「央视一套」「CCTV」等多个已存在的组合并，需用管理页的分组重命名/移动，或让源忽略自带分组后重新用规则归类。
+> 这是"按频道名字归类到目标组"。若要合并**已经存在的多个组名**（如「央视频」「央视」「CCTV」三组合成一组），见下一节「组名智能合并」。
+
+## 组名智能合并（同义组名归一）
+
+不同订阅源给同一类频道起的组名往往不一样，例如央视频道可能分散在「央视频」「央视」「CCTV」「央视频道」「📺央视频道」「💰央视付费频道」多个组里。Worker 会在**重建频道和读取播放列表时**自动把这些同义组名归一为一个组（统一显示为「央视」），前端只看到一组。
+
+归一规则（按优先级）：
+
+1. **内置精确别名**：`央视频 / CCTV / 中央电视台 / 中央台 / 央视网` → `央视`。
+2. **签名匹配**：组名转小写 → 去掉 emoji 和符号（如 `📺`、`💰`）→ 剥离尾部修饰词（`频道/视频/高清/付费/网/台` 等）→ 命中同义词表。所以 `📺央视频道`、`💰央视付费频道`、`CCTV高清频道` 都会归到「央视」。
+3. **未命中则原样保留**，避免过度合并。
+
+这套逻辑同时作用于：保存/导入订阅、改分组规则、定时刷新重建、以及读取 `/api/channels`、`/api/my-playlist`，因此**旧数据刷新页面就即时生效**，无需重新导入。合并后同组里相同播放 URL 的频道仍会按全局 URL 去重。
+
+若内置规则不够（比如想把某两个自定义组合并），可用自定义别名 API：
+
+```bash
+BASE=https://iptv-pages.jxy5460.workers.dev
+curl "$BASE/api/group-alias"                                          # 查看别名
+curl -X POST "$BASE/api/group-alias" -H 'Content-Type: application/json' \
+  -d '{"action":"set","from":"凤凰卫视","to":"卫视"}'
+curl -X POST "$BASE/api/group-alias" -H 'Content-Type: application/json' \
+  -d '{"action":"remove","from":"凤凰卫视"}'
+# action 还支持 clear（清空）、rebuild（仅重建不改动）
+```
 
 ## 可选：管理页口令
 
