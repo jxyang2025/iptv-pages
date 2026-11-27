@@ -13,7 +13,8 @@
  *   playlist-m3u    生成的 M3U 文本
  *   auto-refresh    定时刷新配置与上次执行结果
  *   auto-refresh-lock 定时任务防重入锁（带 TTL，自动过期）
- *   其余小配置各占一键（aliases/group-rules/epg/notify/users/extractors/...）
+ *   group-keyword-rules 关键字自动分组规则 [{group, keywords:[]}]，顺序即优先级
+ *   其余小配置各占一键（aliases/epg/notify/users/extractors/...）
  */
 
 const JSON_HEADERS = { 'Content-Type': 'application/json;charset=UTF-8', 'Cache-Control': 'no-store' };
@@ -271,8 +272,44 @@ function buildM3u(extConfig, channels, sysConfig) {
   return lines.join('\n') + '\n';
 }
 
-// 从外部源配置重建频道分组数组
-function rebuildChannels(extConfig) {
+// ---------- 关键字自动分组规则（复刻上游 groupRulesAPI.js / channelMerger.js）----------
+// 规则格式：[{ group, keywords: [] }]，数组顺序即优先级（首条命中胜）。
+// 只对「未分组」频道生效：源已分好组的频道保持不动，手动移动优先（见 applyKeywordGroup）。
+const GROUP_RULES_KEY = 'group-keyword-rules';
+
+// 读取并规整规则：去空、去空关键字、按 group 去重（保留首次出现位置）
+async function loadGroupRules(env) {
+  const raw = await kvGet(env, GROUP_RULES_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const r of raw) {
+    const group = typeof r?.group === 'string' ? r.group.trim() : '';
+    const keywords = Array.isArray(r?.keywords)
+      ? [...new Set(r.keywords.map(k => String(k).trim()).filter(Boolean))]
+      : [];
+    if (!group || !keywords.length || seen.has(group)) continue;
+    seen.add(group);
+    out.push({ group, keywords });
+  }
+  return out;
+}
+
+// 频道名按规则匹配分组：子串包含、大小写不敏感、首条命中胜；空关键字跳过。无命中返回 null。
+function matchGroupByRules(name, rules) {
+  if (!name || !Array.isArray(rules)) return null;
+  const lower = String(name).toLowerCase();
+  for (const r of rules) {
+    const kws = Array.isArray(r?.keywords) ? r.keywords : [];
+    if (kws.some(k => { const kk = String(k).toLowerCase(); return kk && lower.includes(kk); })) {
+      return r.group;
+    }
+  }
+  return null;
+}
+
+// 从外部源配置重建频道分组数组；rules 为已规整的关键字分组规则
+function rebuildChannels(extConfig, rules = []) {
   const groups = new Map();
   const sources = Array.isArray(extConfig.sources) ? extConfig.sources : [];
   for (const src of sources) {
@@ -281,7 +318,19 @@ function rebuildChannels(extConfig) {
     const sourceId = src.id ? `ext:${src.id}` : '';
     if (src.mode === 'subscription' && Array.isArray(src.parsedChannels)) {
       for (const ch of src.parsedChannels) {
-        const gname = src.ignoreGroups ? '未分组' : (ch.group && ch.group !== '未分组' ? ch.group : (src.group || '未分组'));
+        let gname;
+        if (src.ignoreGroups) {
+          // 忽略源自带分组：按名字匹配规则；未命中的进该源的「默认分组」
+          const matched = matchGroupByRules(ch.name, rules);
+          gname = matched || (src.group || '未分组');
+        } else {
+          gname = ch.group && ch.group !== '未分组' ? ch.group : (src.group || '未分组');
+          // 关键字自动分组：仅当频道仍落在「未分组」时尝试归类（源已分好的组不动）
+          if (gname === '未分组') {
+            const matched = matchGroupByRules(ch.name, rules);
+            if (matched) gname = matched;
+          }
+        }
         if (!groups.has(gname)) groups.set(gname, []);
         groups.get(gname).push({
           id: ch.id || stableId(ch.name, ch.url),
@@ -292,7 +341,11 @@ function rebuildChannels(extConfig) {
         });
       }
     } else if ((src.mode === 'direct' || src.mode === 'fetch') && src.m3u8Url) {
-      const gname = src.group || '未分组';
+      let gname = src.group || '未分组';
+      if (gname === '未分组') {
+        const matched = matchGroupByRules(src.name, rules);
+        if (matched) gname = matched;
+      }
       if (!groups.has(gname)) groups.set(gname, []);
       groups.get(gname).push({
         id: src.id || stableId(src.name, src.m3u8Url),
@@ -304,10 +357,11 @@ function rebuildChannels(extConfig) {
   return normalizeGroups([...groups.entries()].map(([name, dataList]) => ({ name, dataList })));
 }
 
-// 保存配置后同步重建频道 + M3U
+// 保存配置后同步重建频道 + M3U（自动应用最新关键字分组规则）
 async function persistAndRebuild(env, extConfig) {
   await kvPut(env, 'ext-config', extConfig);
-  const channels = rebuildChannels(extConfig);
+  const rules = await loadGroupRules(env);
+  const channels = rebuildChannels(extConfig, rules);
   await kvPut(env, 'channels', channels);
   const sys = await kvGet(env, 'sys-config', DEFAULT_SYS);
   // M3U 是纯文本，直接存 raw（不要走 kvPut 的 JSON.stringify，否则读出来带引号）
@@ -539,7 +593,11 @@ async function handleApi(request, env, url, rel) {
     return method === 'GET' ? ok(d) : ok(d, { message: '已保存' });
   }
   if (seg === 'channel-aliases') return method === 'GET' ? ok({}) : ok(body.data || {}, { message: '已保存' });
-  if (seg === 'group-keyword-rules') return method === 'GET' ? ok([]) : ok(body.data || [], { message: '已保存' });
+  if (seg === 'group-keyword-rules') {
+    if (method === 'GET') return ok(await loadGroupRules(env));
+    if (!authorized(request, env)) return fail('未授权', 403);
+    return handleGroupRules(env, body);
+  }
   if (seg === 'extractors') return method === 'GET' ? ok(DEFAULT_EXTRACTORS) : ok(body.data || DEFAULT_EXTRACTORS, { message: '已保存' });
 
   // 其余次要端点
@@ -564,6 +622,46 @@ async function handleApi(request, env, url, rel) {
   if (seg === 'upload-logo' || seg === 'remove-logo' || seg === 'copy-channel') return fail('Worker 模式暂不支持');
 
   return fail(`未知 API: /api/${seg}`, 404);
+}
+
+// ---------- 关键字自动分组规则：CRUD（复刻上游 groupRulesAPI.js 语义）----------
+// 保存后从 ext-config 原始数据重建频道 + M3U，规则立即生效。
+async function handleGroupRules(env, body) {
+  const action = body.action || 'setRule';
+  const rules = await loadGroupRules(env);
+
+  if (action === 'setRule') {
+    const group = typeof body.group === 'string' ? body.group.trim() : '';
+    if (!group) return fail('请填写分组名');
+    if (group === '未分组') return fail('不能把频道自动归到「未分组」');
+    let list = Array.isArray(body.keywords)
+      ? body.keywords
+      : String(body.keywords || '').split(/[,，\n、]/);
+    list = [...new Set(list.map(s => String(s).trim()).filter(Boolean))];
+    if (!list.length) return fail('请至少填写一个关键字');
+    const entry = { group, keywords: list };
+    const idx = rules.findIndex(r => r.group === group);
+    if (idx >= 0) rules[idx] = entry; else rules.push(entry);
+  } else if (action === 'moveRule') {
+    if (body.direction !== 'up' && body.direction !== 'down') return fail('方向无效');
+    const idx = rules.findIndex(r => r.group === body.group);
+    if (idx < 0) return fail('规则不存在');
+    const to = body.direction === 'up' ? idx - 1 : idx + 1;
+    if (to >= 0 && to < rules.length) [rules[idx], rules[to]] = [rules[to], rules[idx]];
+  } else if (action === 'removeRule') {
+    const next = rules.filter(r => r.group !== body.group);
+    if (next.length === rules.length) return fail('规则不存在');
+    rules.length = 0;
+    rules.push(...next);
+  } else {
+    return fail(`未知操作: ${action}`);
+  }
+
+  await kvPut(env, GROUP_RULES_KEY, rules);
+  // 用最新规则重建频道与 M3U（不重新抓取订阅，仅重新归类）
+  const ext = await kvGet(env, 'ext-config', DEFAULT_EXT());
+  await persistAndRebuild(env, ext);
+  return ok(rules, { message: '已保存' });
 }
 
 // ---------- 外部源：保存 + 导入订阅 ----------
