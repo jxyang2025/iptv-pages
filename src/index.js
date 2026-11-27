@@ -446,8 +446,8 @@ function stableId(name, url) {
   return h.toString(36);
 }
 
-// 把 ext-config + channels 重新生成为 M3U 文本
-function buildM3u(extConfig, channels, sysConfig) {
+// 把 channels 重新生成为 M3U 文本（分组顺序由调用方 sortGroupsByConfig 决定）
+function buildM3u(channels) {
   const lines = ['#EXTM3U'];
   const groups = Array.isArray(channels) ? channels : [];
   for (const g of groups) {
@@ -562,9 +562,8 @@ async function persistAndRebuild(env, extConfig) {
   const [rules, aliases] = await Promise.all([loadGroupRules(env), loadGroupAliases(env)]);
   const channels = rebuildChannels(extConfig, rules, aliases);
   await kvPut(env, 'channels', channels);
-  const sys = await kvGet(env, 'sys-config', DEFAULT_SYS);
   // M3U 是纯文本，直接存 raw（不要走 kvPut 的 JSON.stringify，否则读出来带引号）
-  await env.IPTV_KV.put('playlist-m3u', buildM3u(extConfig, channels, sys));
+  await env.IPTV_KV.put('playlist-m3u', buildM3u(channels));
 }
 
 // ---------- 定时自动刷新订阅 ----------
@@ -981,7 +980,15 @@ async function handleExternalSources(env, body) {
 async function handlePlaylistOut(env, url, rel) {
   const first = rel.split('/')[0].toLowerCase();
   if (first === 'm3u' || first === 'interface.m3u' || first === 'txt') {
-    const m3u = await env.IPTV_KV.get('playlist-m3u', 'text');
+    // 订阅端直接读缓存的 playlist-m3u 会拿不到管理页刚保存的分组顺序，
+    // 因此出口按 channels + playlist-config.groupOrder 实时重建，调整后立即生效。
+    const [cfg, aliases, raw] = await Promise.all([
+      kvGet(env, 'playlist-config', DEFAULT_PLAYLIST_CFG()),
+      loadGroupAliases(env),
+      kvGet(env, 'channels', []),
+    ]);
+    const groups = sortGroupsByConfig(normalizeGroups(raw, aliases), cfg);
+    const m3u = buildM3u(groups);
     const headers = { ...TEXT_HEADERS, 'Content-Disposition': 'inline; filename="interface.m3u"' };
     return new Response(m3u || '#EXTM3U\n', { headers });
   }

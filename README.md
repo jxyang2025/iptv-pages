@@ -30,7 +30,7 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | 关键字自动分组 | ✅ | 按频道名关键字把「未分组」频道归类；首条命中胜、刷新不丢、存 KV |
 | 组名智能合并 | ✅ | 不同源的同义组名（央视频/央视/CCTV/📺央视频道…）自动归一为一个组，可自定义别名 |
 | 全局 URL 去重 | ✅ | 不同订阅源里相同播放 URL 只保留一条，并合并来源徽标 |
-| 生成播放列表 `/m3u` | ✅ | 保存/导入/改分组规则后自动重建 |
+| 生成播放列表 `/m3u` | ✅ | 保存/导入/改分组规则后自动重建；订阅输出实时按自定义分组顺序生成 |
 | 系统配置保存 | ✅ | 存 KV |
 | 我的频道（隐藏/分组/改名/排序） | ✅ | 存 KV；分组上移/下移/置顶/置底保存后，刷新页面仍按自定义顺序显示 |
 | EPG / 台标托管 / 用户令牌 / 直播抓取模块 | ⚠️ 占位 | 返回空结构，页面可用但不产生数据（Workers 无原生进程/浏览器） |
@@ -67,7 +67,7 @@ Cron Trigger ─每整点─> scheduled() → 按间隔拉取订阅 → 重建�
 | `sys-config` | 系统配置 |
 | `built-in` | 内置源配置 |
 | `playlist-config` | 我的频道配置（隐藏/分组/改名/排序等）；其中 `groupOrder` 是分组显示顺序，在 `/api/channels`、`/api/my-playlist` 读取出口应用 |
-| `playlist-m3u` | 生成的 M3U 纯文本 |
+| `playlist-m3u` | 生成的 M3U 纯文本缓存（订阅出口实时按 `groupOrder` 重建，缓存仅备用） |
 | `auto-refresh` | 定时刷新配置 `{enabled,intervalHours,lastRunAt,lastResult}` |
 | `auto-refresh-lock` | 定时任务防重入锁（带 TTL，自动过期） |
 | `group-keyword-rules` | 关键字自动分组规则 `[{group, keywords:[]}]` |
